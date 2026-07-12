@@ -1,0 +1,6 @@
+providers:
+  deepseek:
+    api_key: your-api-key
+    api_base: https://api.deepseek.com
+    api_type: openai
+    auth_type: bearer
