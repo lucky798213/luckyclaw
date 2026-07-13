@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"log"
+	"os"
+	"strings"
 	"time"
 
+	"lukcyclaw/internal/agent"
 	"lukcyclaw/internal/config"
 	"lukcyclaw/internal/provider"
 )
@@ -25,25 +30,39 @@ func main() {
 		log.Fatal(err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	message, err := dsProvider.Chat(
-		ctx,
-		[]provider.Message{
-			{
-				Role:    "user",
-				Content: "你好，请用一句话介绍你自己。",
-			},
-		},
-		nil,
+	claw, err := agent.New(
+		"LuckyClaw",
 		"deepseek-chat",
-		1024,
-		0.7,
+		dsProvider,
+		"SOUL.md",
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	log.Printf("assistant: %s", message.Content)
+	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Printf("当前 Session: %s\n", claw.SessionKey())
+	fmt.Println("输入 /new 开始新会话，按 Ctrl+D 退出")
+	fmt.Print("> ")
+	for scanner.Scan() {
+		input := scanner.Text()
+		if strings.TrimSpace(input) == "/new" {
+			claw.Reset()
+			fmt.Printf("新会话已开始: %s\n", claw.SessionKey())
+			fmt.Print("> ")
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		message, err := claw.Chat(ctx, input)
+		cancel()
+		if err != nil {
+			log.Printf("chat: %v", err)
+			fmt.Print("> ")
+			continue
+		}
+
+		fmt.Println(message.Content)
+		fmt.Print("> ")
+	}
 }
