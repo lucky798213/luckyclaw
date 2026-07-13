@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"lukcyclaw/internal/bus"
 	"lukcyclaw/internal/provider"
 )
 
@@ -40,17 +41,26 @@ func newTestAgent(t *testing.T, prov provider.Provider, soulPath string) *Agent 
 	return a
 }
 
-func TestChatIncludesPreviousMessages(t *testing.T) {
+func inbound(chatID, text string) bus.InboundMessage {
+	return bus.InboundMessage{
+		Channel:   "terminal",
+		AccountID: "local",
+		ChatID:    chatID,
+		Text:      text,
+	}
+}
+
+func TestHandleMessageIncludesPreviousMessages(t *testing.T) {
 	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
 	writeSoul(t, soulPath, "friendly")
 	prov := &fakeProvider{}
 	a := newTestAgent(t, prov, soulPath)
 
-	if _, err := a.Chat(context.Background(), "first"); err != nil {
-		t.Fatal(err)
+	if got := a.HandleMessage(context.Background(), inbound("chat-1", "first")); got != "reply" {
+		t.Fatalf("first reply = %q", got)
 	}
-	if _, err := a.Chat(context.Background(), "second"); err != nil {
-		t.Fatal(err)
+	if got := a.HandleMessage(context.Background(), inbound("chat-1", "second")); got != "reply" {
+		t.Fatalf("second reply = %q", got)
 	}
 
 	want := []provider.Message{
@@ -62,19 +72,15 @@ func TestChatIncludesPreviousMessages(t *testing.T) {
 	assertMessages(t, prov.requests[1], want)
 }
 
-func TestChatReloadsSoul(t *testing.T) {
+func TestHandleMessageReloadsSoul(t *testing.T) {
 	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
 	writeSoul(t, soulPath, "friendly")
 	prov := &fakeProvider{}
 	a := newTestAgent(t, prov, soulPath)
 
-	if _, err := a.Chat(context.Background(), "first"); err != nil {
-		t.Fatal(err)
-	}
+	a.HandleMessage(context.Background(), inbound("chat-1", "first"))
 	writeSoul(t, soulPath, "serious")
-	if _, err := a.Chat(context.Background(), "second"); err != nil {
-		t.Fatal(err)
-	}
+	a.HandleMessage(context.Background(), inbound("chat-1", "second"))
 
 	if got := prov.requests[1][0]; got.Role != "system" || got.Content != "serious" {
 		t.Fatalf("system message = %+v, want updated soul", got)
@@ -87,13 +93,11 @@ func TestResetClearsConversation(t *testing.T) {
 	prov := &fakeProvider{}
 	a := newTestAgent(t, prov, soulPath)
 
-	if _, err := a.Chat(context.Background(), "first"); err != nil {
-		t.Fatal(err)
+	a.HandleMessage(context.Background(), inbound("chat-1", "first"))
+	if got := a.HandleMessage(context.Background(), inbound("chat-1", "/new")); got == "" {
+		t.Fatal("reset reply is empty")
 	}
-	a.Reset()
-	if _, err := a.Chat(context.Background(), "after reset"); err != nil {
-		t.Fatal(err)
-	}
+	a.HandleMessage(context.Background(), inbound("chat-1", "after reset"))
 
 	want := []provider.Message{
 		{Role: "system", Content: "friendly"},
@@ -102,25 +106,48 @@ func TestResetClearsConversation(t *testing.T) {
 	assertMessages(t, prov.requests[1], want)
 }
 
-func TestChatFailureDoesNotSaveMessages(t *testing.T) {
+func TestHandleMessageFailureDoesNotSaveMessages(t *testing.T) {
 	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
 	writeSoul(t, soulPath, "friendly")
 	prov := &fakeProvider{err: errors.New("request failed")}
 	a := newTestAgent(t, prov, soulPath)
 
-	if _, err := a.Chat(context.Background(), "failed"); err == nil {
-		t.Fatal("Chat() error = nil")
+	if got := a.HandleMessage(context.Background(), inbound("chat-1", "failed")); got != handleMessageErrorReply {
+		t.Fatalf("failure reply = %q", got)
 	}
 	prov.err = nil
-	if _, err := a.Chat(context.Background(), "retry"); err != nil {
-		t.Fatal(err)
-	}
+	a.HandleMessage(context.Background(), inbound("chat-1", "retry"))
 
 	want := []provider.Message{
 		{Role: "system", Content: "friendly"},
 		{Role: "user", Content: "retry"},
 	}
 	assertMessages(t, prov.requests[1], want)
+}
+
+func TestHandleMessageIsolatesChats(t *testing.T) {
+	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
+	writeSoul(t, soulPath, "friendly")
+	prov := &fakeProvider{}
+	a := newTestAgent(t, prov, soulPath)
+
+	a.HandleMessage(context.Background(), inbound("chat-a", "from a"))
+	a.HandleMessage(context.Background(), inbound("chat-b", "from b"))
+	a.HandleMessage(context.Background(), inbound("chat-a", "a again"))
+
+	wantChatB := []provider.Message{
+		{Role: "system", Content: "friendly"},
+		{Role: "user", Content: "from b"},
+	}
+	assertMessages(t, prov.requests[1], wantChatB)
+
+	wantChatA := []provider.Message{
+		{Role: "system", Content: "friendly"},
+		{Role: "user", Content: "from a"},
+		{Role: "assistant", Content: "reply"},
+		{Role: "user", Content: "a again"},
+	}
+	assertMessages(t, prov.requests[2], wantChatA)
 }
 
 func assertMessages(t *testing.T, got, want []provider.Message) {

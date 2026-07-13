@@ -13,58 +13,75 @@ import (
 
 // Manager 管理 Agent 的所有会话。
 type Manager struct {
-	mu        sync.RWMutex
-	sessions  map[string]*Session
-	activeKey string
+	mu         sync.RWMutex
+	sessions   map[string]*Session
+	activeKeys map[string]string
 }
 
 // Session 保存一段独立的会话历史。
 // Message 中只存 user 和模型回答
 type Session struct {
-	mu       sync.RWMutex
-	key      string
-	channel  string
-	messages []provider.Message
+	mu        sync.RWMutex
+	key       string
+	channel   string
+	accountID string
+	chatID    string
+	messages  []provider.Message
 }
 
 // NewManager 创建一个内存会话管理器。
 func NewManager() *Manager {
-	return &Manager{sessions: make(map[string]*Session)}
+	return &Manager{
+		sessions:   make(map[string]*Session),
+		activeKeys: make(map[string]string),
+	}
 }
 
-// NewSession 创建并切换到新会话。
-func (m *Manager) NewSession(channel string) *Session {
+// NewSession 为指定平台会话创建并切换到一段新的上下文。
+func (m *Manager) NewSession(channel, accountID, chatID string) *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	conversation := conversationKey(channel, accountID, chatID)
 	for {
 		key := generateKey()
 		if _, exists := m.sessions[key]; exists {
 			continue
 		}
 
-		s := &Session{key: key, channel: channel}
+		s := &Session{
+			key:       key,
+			channel:   channel,
+			accountID: accountID,
+			chatID:    chatID,
+		}
 		m.sessions[key] = s
-		m.activeKey = key
+		m.activeKeys[conversation] = key
 		return s
 	}
 }
 
-// CurrentSession 返回当前会话；不存在时自动创建。
-func (m *Manager) CurrentSession(channel string) *Session {
+// CurrentSession 返回指定平台会话的当前上下文；不存在时自动创建。
+func (m *Manager) CurrentSession(channel, accountID, chatID string) *Session {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	//如果当前的 activeKey 存在就返回对应的会话
-	if current, ok := m.sessions[m.activeKey]; ok {
-		return current
+	conversation := conversationKey(channel, accountID, chatID)
+	if activeKey, ok := m.activeKeys[conversation]; ok {
+		if current, exists := m.sessions[activeKey]; exists {
+			return current
+		}
 	}
 
-	//如果当前还没规划，就创建一个新的session，并返回
 	key := generateKey()
-	s := &Session{key: key, channel: channel}
+	s := &Session{
+		key:       key,
+		channel:   channel,
+		accountID: accountID,
+		chatID:    chatID,
+	}
 	m.sessions[key] = s
-	m.activeKey = key
+	m.activeKeys[conversation] = key
 	return s
 }
 
@@ -86,6 +103,16 @@ func (s *Session) Channel() string {
 	return s.channel
 }
 
+// AccountID 返回接收消息的机器人账号标识。
+func (s *Session) AccountID() string {
+	return s.accountID
+}
+
+// ChatID 返回平台侧的聊天标识。
+func (s *Session) ChatID() string {
+	return s.chatID
+}
+
 // Messages 返回会话消息副本。
 func (s *Session) Messages() []provider.Message {
 	s.mu.RLock()
@@ -98,6 +125,10 @@ func (s *Session) Append(messages ...provider.Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.messages = append(s.messages, messages...)
+}
+
+func conversationKey(channel, accountID, chatID string) string {
+	return channel + "\x00" + accountID + "\x00" + chatID
 }
 
 // generateKey 生成会话 Key，例如 s-1752393600000-a1b2c3d4。
