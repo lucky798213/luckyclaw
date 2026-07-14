@@ -1,6 +1,25 @@
 providers:
   deepseek:
     api_key: your-api-key
-    api_base: https://api.deepseek.com
-    api_type: openai
-    auth_type: bearer
+    api_base: https://api.deepseek.com/v1
+    api_type: openai-chat
+    auth_type: bearer-token
+    models:
+      - deepseek-chat
+      - deepseek-reasoner
+
+agents:
+  lucky:
+    name: LuckyClaw
+    soul_path: SOUL.md
+    default_model: deepseek/deepseek-chat
+    models:
+      - deepseek/deepseek-chat
+      - deepseek/deepseek-reasoner
+
+default_agent: lucky
+
+bindings:
+  - channel: terminal
+    account_id: local
+    agent_id: lucky

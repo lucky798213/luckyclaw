@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 
 	"lukcyclaw/internal/agent"
@@ -21,28 +23,22 @@ func main() {
 		log.Fatal(err)
 	}
 
-	providerCfg, ok := cfg.Providers["deepseek"]
-	if !ok {
-		log.Fatal("provider deepseek is not configured")
-	}
-
-	dsProvider, err := provider.NewOpenAI(providerCfg.APIKey, providerCfg.APIBase)
-	if err != nil {
+	providerManager := provider.NewManager()
+	if err := providerManager.RegisterAll(providerDefinitions(cfg.Providers)); err != nil {
 		log.Fatal(err)
 	}
 
-	claw, err := agent.New(
-		"LuckyClaw",
-		"deepseek-chat",
-		dsProvider,
-		"SOUL.md",
-	)
+	agents, err := buildAgents(cfg.Agents, providerManager)
+	if err != nil {
+		log.Fatal(err)
+	}
+	agentManager, err := agent.NewManager(agents, cfg.DefaultAgent)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	messageBus := bus.New()
-	messageGateway, err := gateway.New(messageBus, claw)
+	messageGateway, err := gateway.New(messageBus, agentManager, cfg.Bindings)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -70,4 +66,43 @@ func main() {
 	case <-signalCtx.Done():
 	case <-terminal.Done():
 	}
+}
+
+func providerDefinitions(configs map[string]config.ProviderConfig) map[string]provider.Definition {
+	definitions := make(map[string]provider.Definition, len(configs))
+	for name, providerCfg := range configs {
+		definitions[name] = provider.Definition{
+			APIKey:   providerCfg.APIKey,
+			APIBase:  providerCfg.APIBase,
+			APIType:  providerCfg.APIType,
+			AuthType: providerCfg.AuthType,
+			Models:   providerCfg.Models,
+		}
+	}
+	return definitions
+}
+
+func buildAgents(configs map[string]config.AgentConfig, providers *provider.Manager) (map[string]*agent.Agent, error) {
+	ids := make([]string, 0, len(configs))
+	for id := range configs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	agents := make(map[string]*agent.Agent, len(configs))
+	for _, id := range ids {
+		agentCfg := configs[id]
+		current, err := agent.New(agent.Options{
+			ID:           id,
+			Name:         agentCfg.Name,
+			DefaultModel: agentCfg.DefaultModel,
+			Models:       agentCfg.Models,
+			SoulPath:     agentCfg.SoulPath,
+		}, providers)
+		if err != nil {
+			return nil, fmt.Errorf("创建 Agent %q: %w", id, err)
+		}
+		agents[id] = current
+	}
+	return agents, nil
 }

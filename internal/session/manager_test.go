@@ -41,3 +41,36 @@ func TestCurrentSessionIsolatesPlatformChats(t *testing.T) {
 		t.Fatalf("other chat has %d messages, want 0", got)
 	}
 }
+
+func TestSessionModelSelectionIsThreadSafeAndIsolated(t *testing.T) {
+	manager := NewManager()
+	first := manager.CurrentSession("feishu", "bot-a", "chat-1")
+	second := manager.CurrentSession("feishu", "bot-a", "chat-2")
+
+	first.SetModelRef("deepseek/deepseek-reasoner")
+	if got := first.ModelRef(); got != "deepseek/deepseek-reasoner" {
+		t.Fatalf("first model = %q", got)
+	}
+	if got := second.ModelRef(); got != "" {
+		t.Fatalf("second model = %q, want empty", got)
+	}
+
+	first.ClearModelRef()
+	if got := first.ModelRef(); got != "" {
+		t.Fatalf("cleared model = %q", got)
+	}
+}
+
+func TestNewSessionDoesNotInheritModelSelection(t *testing.T) {
+	manager := NewManager()
+	current := manager.CurrentSession("terminal", "local", "default")
+	current.SetModelRef("openrouter/vendor/model")
+
+	next := manager.NewSession("terminal", "local", "default")
+	if got := next.ModelRef(); got != "" {
+		t.Fatalf("new session model = %q, want empty", got)
+	}
+	if got := current.ModelRef(); got != "openrouter/vendor/model" {
+		t.Fatalf("old session model = %q", got)
+	}
+}

@@ -2,9 +2,14 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"lukcyclaw/internal/bus"
@@ -12,17 +17,39 @@ import (
 )
 
 type fakeProvider struct {
+	mu       sync.Mutex
 	requests [][]provider.Message
+	models   []string
+	reply    string
 	err      error
 }
 
-func (p *fakeProvider) Chat(_ context.Context, messages []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.Message, error) {
+func (p *fakeProvider) Chat(_ context.Context, messages []provider.Message, _ []provider.Tool, model string, _ int, _ float64) (*provider.Message, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	request := append([]provider.Message(nil), messages...)
 	p.requests = append(p.requests, request)
+	p.models = append(p.models, model)
 	if p.err != nil {
 		return nil, p.err
 	}
-	return &provider.Message{Role: "assistant", Content: "reply"}, nil
+	reply := p.reply
+	if reply == "" {
+		reply = "reply"
+	}
+	return &provider.Message{Role: "assistant", Content: reply}, nil
+}
+
+func (p *fakeProvider) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.requests)
+}
+
+func (p *fakeProvider) calledModels() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.models...)
 }
 
 func writeSoul(t *testing.T, path, content string) {
@@ -32,9 +59,24 @@ func writeSoul(t *testing.T, path, content string) {
 	}
 }
 
-func newTestAgent(t *testing.T, prov provider.Provider, soulPath string) *Agent {
+func newProviderManager(t *testing.T, name string, models []string, prov provider.Provider) *provider.Manager {
 	t.Helper()
-	a, err := New("LuckyClaw", "test-model", prov, soulPath)
+	manager := provider.NewManager()
+	if err := manager.Register(name, prov, models); err != nil {
+		t.Fatal(err)
+	}
+	return manager
+}
+
+func newTestAgent(t *testing.T, providers *provider.Manager, soulPath, defaultModel string, models []string) *Agent {
+	t.Helper()
+	a, err := New(Options{
+		ID:           "lucky",
+		Name:         "LuckyClaw",
+		DefaultModel: defaultModel,
+		Models:       models,
+		SoulPath:     soulPath,
+	}, providers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +96,7 @@ func TestHandleMessageIncludesPreviousMessages(t *testing.T) {
 	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
 	writeSoul(t, soulPath, "friendly")
 	prov := &fakeProvider{}
-	a := newTestAgent(t, prov, soulPath)
+	a := newTestAgent(t, newProviderManager(t, "test", []string{"model"}, prov), soulPath, "test/model", []string{"test/model"})
 
 	if got := a.HandleMessage(context.Background(), inbound("chat-1", "first")); got != "reply" {
 		t.Fatalf("first reply = %q", got)
@@ -76,7 +118,7 @@ func TestHandleMessageReloadsSoul(t *testing.T) {
 	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
 	writeSoul(t, soulPath, "friendly")
 	prov := &fakeProvider{}
-	a := newTestAgent(t, prov, soulPath)
+	a := newTestAgent(t, newProviderManager(t, "test", []string{"model"}, prov), soulPath, "test/model", []string{"test/model"})
 
 	a.HandleMessage(context.Background(), inbound("chat-1", "first"))
 	writeSoul(t, soulPath, "serious")
@@ -87,30 +129,39 @@ func TestHandleMessageReloadsSoul(t *testing.T) {
 	}
 }
 
-func TestResetClearsConversation(t *testing.T) {
+func TestResetClearsConversationAndModelSelection(t *testing.T) {
 	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
 	writeSoul(t, soulPath, "friendly")
-	prov := &fakeProvider{}
-	a := newTestAgent(t, prov, soulPath)
+	deepseek := &fakeProvider{}
+	openai := &fakeProvider{}
+	providers := newProviderManager(t, "deepseek", []string{"chat"}, deepseek)
+	if err := providers.Register("openai", openai, []string{"mini"}); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestAgent(t, providers, soulPath, "deepseek/chat", []string{"deepseek/chat", "openai/mini"})
 
+	a.HandleMessage(context.Background(), inbound("chat-1", "/model openai/mini"))
 	a.HandleMessage(context.Background(), inbound("chat-1", "first"))
 	if got := a.HandleMessage(context.Background(), inbound("chat-1", "/new")); got == "" {
 		t.Fatal("reset reply is empty")
 	}
 	a.HandleMessage(context.Background(), inbound("chat-1", "after reset"))
 
+	if openai.callCount() != 1 || deepseek.callCount() != 1 {
+		t.Fatalf("provider calls: openai=%d deepseek=%d", openai.callCount(), deepseek.callCount())
+	}
 	want := []provider.Message{
 		{Role: "system", Content: "friendly"},
 		{Role: "user", Content: "after reset"},
 	}
-	assertMessages(t, prov.requests[1], want)
+	assertMessages(t, deepseek.requests[0], want)
 }
 
 func TestHandleMessageFailureDoesNotSaveMessages(t *testing.T) {
 	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
 	writeSoul(t, soulPath, "friendly")
 	prov := &fakeProvider{err: errors.New("request failed")}
-	a := newTestAgent(t, prov, soulPath)
+	a := newTestAgent(t, newProviderManager(t, "test", []string{"model"}, prov), soulPath, "test/model", []string{"test/model"})
 
 	if got := a.HandleMessage(context.Background(), inbound("chat-1", "failed")); got != handleMessageErrorReply {
 		t.Fatalf("failure reply = %q", got)
@@ -129,7 +180,7 @@ func TestHandleMessageIsolatesChats(t *testing.T) {
 	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
 	writeSoul(t, soulPath, "friendly")
 	prov := &fakeProvider{}
-	a := newTestAgent(t, prov, soulPath)
+	a := newTestAgent(t, newProviderManager(t, "test", []string{"model"}, prov), soulPath, "test/model", []string{"test/model"})
 
 	a.HandleMessage(context.Background(), inbound("chat-a", "from a"))
 	a.HandleMessage(context.Background(), inbound("chat-b", "from b"))
@@ -148,6 +199,180 @@ func TestHandleMessageIsolatesChats(t *testing.T) {
 		{Role: "user", Content: "a again"},
 	}
 	assertMessages(t, prov.requests[2], wantChatA)
+}
+
+func TestMessageModelOverrideDoesNotPersist(t *testing.T) {
+	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
+	writeSoul(t, soulPath, "friendly")
+	deepseek := &fakeProvider{}
+	openai := &fakeProvider{}
+	providers := newProviderManager(t, "deepseek", []string{"chat"}, deepseek)
+	if err := providers.Register("openai", openai, []string{"mini"}); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestAgent(t, providers, soulPath, "deepseek/chat", []string{"deepseek/chat", "openai/mini"})
+
+	a.HandleMessage(context.Background(), inbound("chat-1", "default"))
+	override := inbound("chat-1", "override")
+	override.ModelRef = "openai/mini"
+	a.HandleMessage(context.Background(), override)
+	a.HandleMessage(context.Background(), inbound("chat-1", "default again"))
+
+	if got := deepseek.calledModels(); len(got) != 2 || got[0] != "chat" || got[1] != "chat" {
+		t.Fatalf("deepseek models = %#v", got)
+	}
+	if got := openai.calledModels(); len(got) != 1 || got[0] != "mini" {
+		t.Fatalf("openai models = %#v", got)
+	}
+}
+
+func TestMessageModelOverrideHasPriorityOverSessionModel(t *testing.T) {
+	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
+	writeSoul(t, soulPath, "friendly")
+	deepseek := &fakeProvider{}
+	openai := &fakeProvider{}
+	providers := newProviderManager(t, "deepseek", []string{"chat"}, deepseek)
+	if err := providers.Register("openai", openai, []string{"mini"}); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestAgent(t, providers, soulPath, "deepseek/chat", []string{"deepseek/chat", "openai/mini"})
+
+	a.HandleMessage(context.Background(), inbound("chat-1", "/model openai/mini"))
+	override := inbound("chat-1", "one message")
+	override.ModelRef = "deepseek/chat"
+	a.HandleMessage(context.Background(), override)
+	a.HandleMessage(context.Background(), inbound("chat-1", "session model again"))
+
+	if deepseek.callCount() != 1 || openai.callCount() != 1 {
+		t.Fatalf("provider calls: deepseek=%d openai=%d", deepseek.callCount(), openai.callCount())
+	}
+}
+
+func TestModelCommandIsSessionScopedAndCanRestoreDefault(t *testing.T) {
+	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
+	writeSoul(t, soulPath, "friendly")
+	deepseek := &fakeProvider{}
+	openai := &fakeProvider{}
+	providers := newProviderManager(t, "deepseek", []string{"chat"}, deepseek)
+	if err := providers.Register("openai", openai, []string{"mini"}); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestAgent(t, providers, soulPath, "deepseek/chat", []string{"deepseek/chat", "openai/mini"})
+
+	if got := a.HandleMessage(context.Background(), inbound("chat-a", "/model openai/mini")); got != "当前会话模型已切换为: openai/mini" {
+		t.Fatalf("switch reply = %q", got)
+	}
+	a.HandleMessage(context.Background(), inbound("chat-a", "from a"))
+	a.HandleMessage(context.Background(), inbound("chat-b", "from b"))
+	if got := a.HandleMessage(context.Background(), inbound("chat-a", "/model default")); got != "已恢复默认模型: deepseek/chat" {
+		t.Fatalf("default reply = %q", got)
+	}
+	a.HandleMessage(context.Background(), inbound("chat-a", "a default"))
+
+	if openai.callCount() != 1 || deepseek.callCount() != 2 {
+		t.Fatalf("provider calls: openai=%d deepseek=%d", openai.callCount(), deepseek.callCount())
+	}
+}
+
+func TestModelCommandListsCurrentDefaultAndAllowedModels(t *testing.T) {
+	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
+	writeSoul(t, soulPath, "friendly")
+	providers := newProviderManager(t, "deepseek", []string{"chat"}, &fakeProvider{})
+	if err := providers.Register("openai", &fakeProvider{}, []string{"mini"}); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestAgent(t, providers, soulPath, "deepseek/chat", []string{"openai/mini", "deepseek/chat"})
+
+	reply := a.HandleMessage(context.Background(), inbound("chat-1", "/model list"))
+	for _, want := range []string{
+		"当前模型: deepseek/chat",
+		"默认模型: deepseek/chat",
+		"- deepseek/chat\n- openai/mini",
+	} {
+		if !strings.Contains(reply, want) {
+			t.Fatalf("reply = %q, missing %q", reply, want)
+		}
+	}
+}
+
+func TestInvalidModelDoesNotCallProvider(t *testing.T) {
+	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
+	writeSoul(t, soulPath, "friendly")
+	prov := &fakeProvider{}
+	a := newTestAgent(t, newProviderManager(t, "deepseek", []string{"chat"}, prov), soulPath, "deepseek/chat", []string{"deepseek/chat"})
+
+	msg := inbound("chat-1", "hello")
+	msg.ModelRef = "openai/mini"
+	if got := a.HandleMessage(context.Background(), msg); got == handleMessageErrorReply {
+		t.Fatalf("invalid model returned generic error: %q", got)
+	}
+	if prov.callCount() != 0 {
+		t.Fatalf("provider was called %d times", prov.callCount())
+	}
+	if got := a.HandleMessage(context.Background(), inbound("chat-1", "/model openai/mini")); got == "" {
+		t.Fatal("model command error is empty")
+	}
+	if prov.callCount() != 0 {
+		t.Fatalf("provider was called after command: %d", prov.callCount())
+	}
+}
+
+func TestAgentCanCallDifferentProviderAPIBase(t *testing.T) {
+	makeServer := func(wantModel, reply string, received chan<- string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Model string `json:"model"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			received <- body.Model
+			if body.Model != wantModel {
+				t.Errorf("model = %q, want %q", body.Model, wantModel)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": reply}}},
+			})
+		}))
+	}
+
+	deepseekModels := make(chan string, 1)
+	openaiModels := make(chan string, 1)
+	deepseekServer := makeServer("deepseek-chat", "deepseek", deepseekModels)
+	defer deepseekServer.Close()
+	openaiServer := makeServer("gpt-4.1-mini", "openai", openaiModels)
+	defer openaiServer.Close()
+
+	deepseekProvider, err := provider.NewOpenAI("key", deepseekServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openaiProvider, err := provider.NewOpenAI("key", openaiServer.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers := newProviderManager(t, "deepseek", []string{"deepseek-chat"}, deepseekProvider)
+	if err := providers.Register("openai", openaiProvider, []string{"gpt-4.1-mini"}); err != nil {
+		t.Fatal(err)
+	}
+	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
+	writeSoul(t, soulPath, "friendly")
+	a := newTestAgent(t, providers, soulPath, "deepseek/deepseek-chat", []string{"deepseek/deepseek-chat", "openai/gpt-4.1-mini"})
+
+	if got := a.HandleMessage(context.Background(), inbound("chat-1", "default")); got != "deepseek" {
+		t.Fatalf("default reply = %q", got)
+	}
+	override := inbound("chat-1", "override")
+	override.ModelRef = "openai/gpt-4.1-mini"
+	if got := a.HandleMessage(context.Background(), override); got != "openai" {
+		t.Fatalf("override reply = %q", got)
+	}
+	if got := <-deepseekModels; got != "deepseek-chat" {
+		t.Fatalf("deepseek model = %q", got)
+	}
+	if got := <-openaiModels; got != "gpt-4.1-mini" {
+		t.Fatalf("openai model = %q", got)
+	}
 }
 
 func assertMessages(t *testing.T, got, want []provider.Message) {

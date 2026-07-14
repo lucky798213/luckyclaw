@@ -26,6 +26,7 @@ type Session struct {
 	channel   string
 	accountID string
 	chatID    string
+	modelRef  string
 	messages  []provider.Message
 }
 
@@ -118,6 +119,25 @@ func (s *Session) Messages() []provider.Message {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]provider.Message(nil), s.messages...)
+}
+
+// ModelRef 返回当前会话选择的模型；空字符串表示使用 Agent 默认模型。
+func (s *Session) ModelRef() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.modelRef
+}
+
+// SetModelRef 设置当前会话后续消息使用的模型。
+func (s *Session) SetModelRef(modelRef string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.modelRef = modelRef
+}
+
+// ClearModelRef 清除会话模型覆盖，使后续消息恢复 Agent 默认模型。
+func (s *Session) ClearModelRef() {
+	s.SetModelRef("")
 }
 
 // Append 追加会话消息。
