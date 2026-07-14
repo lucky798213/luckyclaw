@@ -23,3 +23,10 @@ bindings:
   - channel: terminal
     account_id: local
     agent_id: lucky
+
+  # chat_id 可将某个聊天绑定到指定 Agent；thread_id 可进一步覆盖其中一个线程。
+  # - channel: telegram
+  #   account_id: bot-id
+  #   chat_id: group-id
+  #   thread_id: topic-id
+  #   agent_id: lucky

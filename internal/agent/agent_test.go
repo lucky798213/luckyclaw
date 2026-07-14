@@ -201,6 +201,37 @@ func TestHandleMessageIsolatesChats(t *testing.T) {
 	assertMessages(t, prov.requests[2], wantChatA)
 }
 
+func TestHandleMessageIsolatesThreads(t *testing.T) {
+	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
+	writeSoul(t, soulPath, "friendly")
+	prov := &fakeProvider{}
+	a := newTestAgent(t, newProviderManager(t, "test", []string{"model"}, prov), soulPath, "test/model", []string{"test/model"})
+
+	first := inbound("chat-1", "from topic a")
+	first.ThreadID = "topic-a"
+	second := inbound("chat-1", "from topic b")
+	second.ThreadID = "topic-b"
+	firstAgain := inbound("chat-1", "topic a again")
+	firstAgain.ThreadID = "topic-a"
+	a.HandleMessage(context.Background(), first)
+	a.HandleMessage(context.Background(), second)
+	a.HandleMessage(context.Background(), firstAgain)
+
+	wantTopicB := []provider.Message{
+		{Role: "system", Content: "friendly"},
+		{Role: "user", Content: "from topic b"},
+	}
+	assertMessages(t, prov.requests[1], wantTopicB)
+
+	wantTopicA := []provider.Message{
+		{Role: "system", Content: "friendly"},
+		{Role: "user", Content: "from topic a"},
+		{Role: "assistant", Content: "reply"},
+		{Role: "user", Content: "topic a again"},
+	}
+	assertMessages(t, prov.requests[2], wantTopicA)
+}
+
 func TestMessageModelOverrideDoesNotPersist(t *testing.T) {
 	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
 	writeSoul(t, soulPath, "friendly")

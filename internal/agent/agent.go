@@ -118,14 +118,14 @@ func New(options Options, providers *provider.Manager) (*Agent, error) {
 
 // HandleMessage 处理统一入站消息，并返回可以直接发送给平台的文本。
 func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) string {
-	channel, accountID, chatID := msg.SessionTriple()
+	address := msg.Address()
 	trimmed := strings.TrimSpace(msg.Text)
 	if trimmed == "/new" {
-		newSession := a.sessionsManager.NewSession(channel, accountID, chatID)
+		newSession := a.sessionsManager.NewSession(address)
 		return fmt.Sprintf("新会话已开始: %s", newSession.Key())
 	}
 	if fields := strings.Fields(trimmed); len(fields) > 0 && fields[0] == "/model" {
-		return a.handleModelCommand(channel, accountID, chatID, fields[1:])
+		return a.handleModelCommand(address, fields[1:])
 	}
 
 	reply, err := a.handleMessage(ctx, msg)
@@ -140,8 +140,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	return reply.Content
 }
 
-func (a *Agent) handleModelCommand(channel, accountID, chatID string, args []string) string {
-	currentSession := a.sessionsManager.CurrentSession(channel, accountID, chatID)
+func (a *Agent) handleModelCommand(address bus.ConversationAddress, args []string) string {
+	currentSession := a.sessionsManager.CurrentSession(address)
 	if len(args) == 0 || (len(args) == 1 && args[0] == "list") {
 		current := currentSession.ModelRef()
 		if current == "" {
@@ -173,8 +173,7 @@ func (a *Agent) handleMessage(ctx context.Context, msg bus.InboundMessage) (*pro
 		return nil, fmt.Errorf("read soul: %w", err)
 	}
 
-	channel, accountID, chatID := msg.SessionTriple()
-	currentSession := a.sessionsManager.CurrentSession(channel, accountID, chatID)
+	currentSession := a.sessionsManager.CurrentSession(msg.Address())
 	selectedModel := msg.ModelRef
 	if selectedModel == "" {
 		selectedModel = currentSession.ModelRef()

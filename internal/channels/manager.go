@@ -12,7 +12,7 @@ import (
 // Manager 管理所有平台实例，并按照平台和账号分发出站消息。
 type Manager struct {
 	mu       sync.RWMutex
-	channels map[string]Channel
+	channels map[bus.ChannelAccount]Channel
 	bus      *bus.MessageBus
 }
 
@@ -22,7 +22,7 @@ func NewManager(messageBus *bus.MessageBus) (*Manager, error) {
 		return nil, fmt.Errorf("message bus cannot be nil")
 	}
 	return &Manager{
-		channels: make(map[string]Channel),
+		channels: make(map[bus.ChannelAccount]Channel),
 		bus:      messageBus,
 	}, nil
 }
@@ -38,7 +38,8 @@ func (m *Manager) Register(channel Channel) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.channels[channelKey(channel.Name(), channel.AccountID())] = channel
+	account := bus.ChannelAccount{Channel: channel.Name(), AccountID: channel.AccountID()}
+	m.channels[account] = channel
 	return nil
 }
 
@@ -70,7 +71,7 @@ func (m *Manager) routeOutbound(ctx context.Context) {
 			return
 		case msg := <-m.bus.Outbound:
 			m.mu.RLock()
-			channel, ok := m.channels[channelKey(msg.Channel, msg.AccountID)]
+			channel, ok := m.channels[msg.Address().Account()]
 			m.mu.RUnlock()
 			if !ok {
 				log.Printf("没有找到出站渠道: %s:%s", msg.Channel, msg.AccountID)
@@ -81,8 +82,4 @@ func (m *Manager) routeOutbound(ctx context.Context) {
 			}
 		}
 	}
-}
-
-func channelKey(channel, accountID string) string {
-	return channel + "\x00" + accountID
 }

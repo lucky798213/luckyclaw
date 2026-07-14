@@ -3,15 +3,21 @@ package session
 import (
 	"testing"
 
+	"lukcyclaw/internal/bus"
 	"lukcyclaw/internal/provider"
 )
 
+func testAddress(channel, accountID, chatID string) bus.ConversationAddress {
+	return bus.ConversationAddress{Channel: channel, AccountID: accountID, ChatID: chatID}
+}
+
 func TestOpenCreatesIndependentSessions(t *testing.T) {
 	manager := NewManager()
-	first := manager.NewSession("terminal", "local", "default")
+	address := testAddress("terminal", "local", "default")
+	first := manager.NewSession(address)
 	first.Append(provider.Message{Role: "user", Content: "hello"})
 
-	second := manager.NewSession("terminal", "local", "default")
+	second := manager.NewSession(address)
 	if first.Key() == second.Key() {
 		t.Fatalf("new session reused key %q", first.Key())
 	}
@@ -25,15 +31,15 @@ func TestOpenCreatesIndependentSessions(t *testing.T) {
 
 func TestCurrentSessionIsolatesPlatformChats(t *testing.T) {
 	manager := NewManager()
-	first := manager.CurrentSession("feishu", "bot-a", "chat-1")
+	first := manager.CurrentSession(testAddress("feishu", "bot-a", "chat-1"))
 	first.Append(provider.Message{Role: "user", Content: "hello"})
 
-	same := manager.CurrentSession("feishu", "bot-a", "chat-1")
+	same := manager.CurrentSession(testAddress("feishu", "bot-a", "chat-1"))
 	if same.Key() != first.Key() {
 		t.Fatal("same platform chat did not reuse its active session")
 	}
 
-	other := manager.CurrentSession("feishu", "bot-a", "chat-2")
+	other := manager.CurrentSession(testAddress("feishu", "bot-a", "chat-2"))
 	if other.Key() == first.Key() {
 		t.Fatal("different platform chats shared one session")
 	}
@@ -44,8 +50,8 @@ func TestCurrentSessionIsolatesPlatformChats(t *testing.T) {
 
 func TestSessionModelSelectionIsThreadSafeAndIsolated(t *testing.T) {
 	manager := NewManager()
-	first := manager.CurrentSession("feishu", "bot-a", "chat-1")
-	second := manager.CurrentSession("feishu", "bot-a", "chat-2")
+	first := manager.CurrentSession(testAddress("feishu", "bot-a", "chat-1"))
+	second := manager.CurrentSession(testAddress("feishu", "bot-a", "chat-2"))
 
 	first.SetModelRef("deepseek/deepseek-reasoner")
 	if got := first.ModelRef(); got != "deepseek/deepseek-reasoner" {
@@ -63,14 +69,42 @@ func TestSessionModelSelectionIsThreadSafeAndIsolated(t *testing.T) {
 
 func TestNewSessionDoesNotInheritModelSelection(t *testing.T) {
 	manager := NewManager()
-	current := manager.CurrentSession("terminal", "local", "default")
+	address := testAddress("terminal", "local", "default")
+	current := manager.CurrentSession(address)
 	current.SetModelRef("openrouter/vendor/model")
 
-	next := manager.NewSession("terminal", "local", "default")
+	next := manager.NewSession(address)
 	if got := next.ModelRef(); got != "" {
 		t.Fatalf("new session model = %q, want empty", got)
 	}
 	if got := current.ModelRef(); got != "openrouter/vendor/model" {
 		t.Fatalf("old session model = %q", got)
+	}
+}
+
+func TestCurrentSessionIsolatesThreads(t *testing.T) {
+	manager := NewManager()
+	base := testAddress("telegram", "bot-a", "chat-1")
+	firstAddress := base
+	firstAddress.ThreadID = "topic-1"
+	secondAddress := base
+	secondAddress.ThreadID = "topic-2"
+
+	first := manager.CurrentSession(firstAddress)
+	same := manager.CurrentSession(firstAddress)
+	second := manager.CurrentSession(secondAddress)
+	baseSession := manager.CurrentSession(base)
+
+	if same.Key() != first.Key() {
+		t.Fatal("同一线程没有复用活跃会话")
+	}
+	if second.Key() == first.Key() || baseSession.Key() == first.Key() || baseSession.Key() == second.Key() {
+		t.Fatal("基础聊天和不同线程共享了会话")
+	}
+	if first.Address() != firstAddress {
+		t.Fatalf("Address() = %+v, want %+v", first.Address(), firstAddress)
+	}
+	if first.Channel() != "telegram" || first.AccountID() != "bot-a" || first.ChatID() != "chat-1" || first.ThreadID() != "topic-1" {
+		t.Fatalf("会话地址便捷方法返回错误: %+v", first.Address())
 	}
 }

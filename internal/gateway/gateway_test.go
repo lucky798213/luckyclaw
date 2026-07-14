@@ -53,6 +53,7 @@ func newTestGateway(t *testing.T, bindings []config.BindingConfig) (*Gateway, *b
 		"default": newTestAgent(t, "default", "default reply"),
 		"account": newTestAgent(t, "account", "account reply"),
 		"exact":   newTestAgent(t, "exact", "exact reply"),
+		"thread":  newTestAgent(t, "thread", "thread reply"),
 	}, "default")
 	if err != nil {
 		t.Fatal(err)
@@ -88,11 +89,12 @@ func TestGatewayConvertsInboundToOutbound(t *testing.T) {
 		Channel:   "feishu",
 		AccountID: "cli_test",
 		ChatID:    "chat-1",
+		ThreadID:  "thread-1",
 		MessageID: "message-1",
 		Text:      "hello",
 	}
 	out := sendAndReceive(t, messageBus, in)
-	if out.Channel != in.Channel || out.AccountID != in.AccountID || out.ChatID != in.ChatID {
+	if out.Address() != in.Address() {
 		t.Fatalf("outbound route = %+v", out)
 	}
 	if out.Text != "default reply" || out.ReplyToMsgID != in.MessageID {
@@ -104,6 +106,7 @@ func TestGatewayRoutingPriority(t *testing.T) {
 	bindings := []config.BindingConfig{
 		{Channel: "feishu", AccountID: "bot", AgentID: "account"},
 		{Channel: "feishu", AccountID: "bot", ChatID: "vip", AgentID: "exact"},
+		{Channel: "feishu", AccountID: "bot", ChatID: "vip", ThreadID: "topic-1", AgentID: "thread"},
 	}
 	gateway, messageBus := newTestGateway(t, bindings)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -116,7 +119,17 @@ func TestGatewayRoutingPriority(t *testing.T) {
 		want string
 	}{
 		{
-			name: "精确聊天绑定优先于账号绑定",
+			name: "线程绑定优先于聊天和账号绑定",
+			msg:  bus.InboundMessage{Channel: "feishu", AccountID: "bot", ChatID: "vip", ThreadID: "topic-1", Text: "hello"},
+			want: "thread reply",
+		},
+		{
+			name: "没有线程绑定时回退到聊天绑定",
+			msg:  bus.InboundMessage{Channel: "feishu", AccountID: "bot", ChatID: "vip", ThreadID: "topic-2", Text: "hello"},
+			want: "exact reply",
+		},
+		{
+			name: "聊天绑定优先于账号绑定",
 			msg:  bus.InboundMessage{Channel: "feishu", AccountID: "bot", ChatID: "vip", Text: "hello"},
 			want: "exact reply",
 		},
@@ -132,7 +145,7 @@ func TestGatewayRoutingPriority(t *testing.T) {
 		},
 		{
 			name: "显式 Agent 覆盖所有绑定",
-			msg:  bus.InboundMessage{Channel: "feishu", AccountID: "bot", ChatID: "vip", AgentID: "account", Text: "hello"},
+			msg:  bus.InboundMessage{Channel: "feishu", AccountID: "bot", ChatID: "vip", ThreadID: "topic-1", AgentID: "account", Text: "hello"},
 			want: "account reply",
 		},
 	}
@@ -187,6 +200,17 @@ func TestGatewayValidatesBindings(t *testing.T) {
 				{Channel: "feishu", AccountID: "bot", ChatID: "chat", AgentID: "default"},
 				{Channel: "feishu", AccountID: "bot", ChatID: "chat", AgentID: "default"},
 			},
+		},
+		{
+			name: "重复线程绑定",
+			bindings: []config.BindingConfig{
+				{Channel: "feishu", AccountID: "bot", ChatID: "chat", ThreadID: "topic", AgentID: "default"},
+				{Channel: "feishu", AccountID: "bot", ChatID: "chat", ThreadID: "topic", AgentID: "default"},
+			},
+		},
+		{
+			name:     "线程绑定缺少聊天",
+			bindings: []config.BindingConfig{{Channel: "feishu", AccountID: "bot", ThreadID: "topic", AgentID: "default"}},
 		},
 	}
 	for _, test := range tests {

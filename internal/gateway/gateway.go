@@ -17,8 +17,9 @@ const defaultMessageTimeout = 30 * time.Second
 type Gateway struct {
 	bus             *bus.MessageBus
 	agents          *agent.Manager
-	exactBindings   map[string]string
-	accountBindings map[string]string
+	threadBindings  map[bus.ConversationAddress]string
+	chatBindings    map[bus.ConversationAddress]string
+	accountBindings map[bus.ChannelAccount]string
 	messageTimeout  time.Duration
 }
 
@@ -30,37 +31,55 @@ func New(messageBus *bus.MessageBus, agents *agent.Manager, bindings []config.Bi
 	if agents == nil {
 		return nil, fmt.Errorf("agent manager cannot be nil")
 	}
-	exactBindings := make(map[string]string)
-	accountBindings := make(map[string]string)
+	threadBindings := make(map[bus.ConversationAddress]string)
+	chatBindings := make(map[bus.ConversationAddress]string)
+	accountBindings := make(map[bus.ChannelAccount]string)
 	for index, binding := range bindings {
-		//找 agent_id
+		// 确保绑定引用的 Agent 已经加载。
 		if agents.AgentByID(binding.AgentID) == nil {
 			return nil, fmt.Errorf("binding %d references unknown agent %q", index, binding.AgentID)
 		}
 
-		//确保这个 agent具体的用户绑定了
+		// 平台和机器人账号共同决定消息属于哪个渠道实例。
 		if binding.Channel == "" || binding.AccountID == "" {
 			return nil, fmt.Errorf("binding %d requires channel and account_id", index)
 		}
+		if binding.ThreadID != "" && binding.ChatID == "" {
+			return nil, fmt.Errorf("binding %d thread_id requires chat_id", index)
+		}
 
 		if binding.ChatID == "" {
-			key := accountBindingKey(binding.Channel, binding.AccountID)
+			key := bus.ChannelAccount{Channel: binding.Channel, AccountID: binding.AccountID}
 			if _, duplicate := accountBindings[key]; duplicate {
 				return nil, fmt.Errorf("binding %d duplicates channel/account", index)
 			}
 			accountBindings[key] = binding.AgentID
 			continue
 		}
-		key := exactBindingKey(binding.Channel, binding.AccountID, binding.ChatID)
-		if _, duplicate := exactBindings[key]; duplicate {
+
+		key := bus.ConversationAddress{
+			Channel:   binding.Channel,
+			AccountID: binding.AccountID,
+			ChatID:    binding.ChatID,
+			ThreadID:  binding.ThreadID,
+		}
+		if binding.ThreadID != "" {
+			if _, duplicate := threadBindings[key]; duplicate {
+				return nil, fmt.Errorf("binding %d duplicates channel/account/chat/thread", index)
+			}
+			threadBindings[key] = binding.AgentID
+			continue
+		}
+		if _, duplicate := chatBindings[key]; duplicate {
 			return nil, fmt.Errorf("binding %d duplicates channel/account/chat", index)
 		}
-		exactBindings[key] = binding.AgentID
+		chatBindings[key] = binding.AgentID
 	}
 	return &Gateway{
 		bus:             messageBus,
 		agents:          agents,
-		exactBindings:   exactBindings,
+		threadBindings:  threadBindings,
+		chatBindings:    chatBindings,
 		accountBindings: accountBindings,
 		messageTimeout:  defaultMessageTimeout,
 	}, nil
@@ -97,6 +116,7 @@ func (g *Gateway) handleInbound(ctx context.Context, msg bus.InboundMessage) {
 		Channel:      msg.Channel,
 		AccountID:    msg.AccountID,
 		ChatID:       msg.ChatID,
+		ThreadID:     msg.ThreadID,
 		Text:         reply,
 		ReplyToMsgID: msg.MessageID,
 	}
@@ -113,22 +133,21 @@ func (g *Gateway) matchAgent(msg bus.InboundMessage) (*agent.Agent, error) {
 		}
 		return nil, fmt.Errorf("没有找到指定的 Agent: %s", msg.AgentID)
 	}
-	if agentID, exists := g.exactBindings[exactBindingKey(msg.Channel, msg.AccountID, msg.ChatID)]; exists {
+	address := msg.Address()
+	if msg.ThreadID != "" {
+		if agentID, exists := g.threadBindings[address]; exists {
+			return g.agents.AgentByID(agentID), nil
+		}
+	}
+	address.ThreadID = ""
+	if agentID, exists := g.chatBindings[address]; exists {
 		return g.agents.AgentByID(agentID), nil
 	}
-	if agentID, exists := g.accountBindings[accountBindingKey(msg.Channel, msg.AccountID)]; exists {
+	if agentID, exists := g.accountBindings[address.Account()]; exists {
 		return g.agents.AgentByID(agentID), nil
 	}
 	if target := g.agents.DefaultAgent(); target != nil {
 		return target, nil
 	}
 	return nil, fmt.Errorf("没有可用的默认 Agent")
-}
-
-func exactBindingKey(channel, accountID, chatID string) string {
-	return channel + "\x00" + accountID + "\x00" + chatID
-}
-
-func accountBindingKey(channel, accountID string) string {
-	return channel + "\x00" + accountID
 }

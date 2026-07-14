@@ -10,6 +10,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"lukcyclaw/internal/bus"
 	"lukcyclaw/internal/provider"
 )
 
@@ -50,6 +51,7 @@ type BindingConfig struct {
 	Channel   string `yaml:"channel"`
 	AccountID string `yaml:"account_id"`
 	ChatID    string `yaml:"chat_id,omitempty"`
+	ThreadID  string `yaml:"thread_id,omitempty"`
 	AgentID   string `yaml:"agent_id"`
 }
 
@@ -159,7 +161,9 @@ func validate(cfg *Config) error {
 		}
 	}
 
-	bindings := make(map[string]struct{}, len(cfg.Bindings))
+	accountBindings := make(map[bus.ChannelAccount]struct{}, len(cfg.Bindings))
+	chatBindings := make(map[bus.ConversationAddress]struct{}, len(cfg.Bindings))
+	threadBindings := make(map[bus.ConversationAddress]struct{}, len(cfg.Bindings))
 	for index, binding := range cfg.Bindings {
 		if strings.TrimSpace(binding.Channel) == "" {
 			return fmt.Errorf("binding %d channel is required", index)
@@ -170,11 +174,36 @@ func validate(cfg *Config) error {
 		if _, exists := cfg.Agents[binding.AgentID]; !exists {
 			return fmt.Errorf("binding %d references unknown agent %q", index, binding.AgentID)
 		}
-		key := binding.Channel + "\x00" + binding.AccountID + "\x00" + binding.ChatID
-		if _, duplicate := bindings[key]; duplicate {
+		if binding.ThreadID != "" && binding.ChatID == "" {
+			return fmt.Errorf("binding %d thread_id requires chat_id", index)
+		}
+
+		if binding.ChatID == "" {
+			key := bus.ChannelAccount{Channel: binding.Channel, AccountID: binding.AccountID}
+			if _, duplicate := accountBindings[key]; duplicate {
+				return fmt.Errorf("binding %d duplicates channel/account", index)
+			}
+			accountBindings[key] = struct{}{}
+			continue
+		}
+
+		key := bus.ConversationAddress{
+			Channel:   binding.Channel,
+			AccountID: binding.AccountID,
+			ChatID:    binding.ChatID,
+			ThreadID:  binding.ThreadID,
+		}
+		if binding.ThreadID != "" {
+			if _, duplicate := threadBindings[key]; duplicate {
+				return fmt.Errorf("binding %d duplicates channel/account/chat/thread", index)
+			}
+			threadBindings[key] = struct{}{}
+			continue
+		}
+		if _, duplicate := chatBindings[key]; duplicate {
 			return fmt.Errorf("binding %d duplicates channel/account/chat", index)
 		}
-		bindings[key] = struct{}{}
+		chatBindings[key] = struct{}{}
 	}
 	return nil
 }

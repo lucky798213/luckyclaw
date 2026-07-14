@@ -77,6 +77,23 @@ func TestLoadFileLoadsMultipleProvidersAgentsAndBindings(t *testing.T) {
 	}
 }
 
+func TestLoadFileLoadsThreadBinding(t *testing.T) {
+	content := validConfigYAML + `
+  - channel: feishu
+    account_id: bot
+    chat_id: coder-chat
+    thread_id: topic-1
+    agent_id: lucky
+`
+	cfg, err := LoadFile(writeConfig(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Bindings) != 3 || cfg.Bindings[2].ThreadID != "topic-1" {
+		t.Fatalf("bindings = %+v", cfg.Bindings)
+	}
+}
+
 func TestLoadFileStrictValidation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -115,7 +132,7 @@ func TestLoadFileStrictValidation(t *testing.T) {
     account_id: local
     agent_id: coder
 `,
-			want: "duplicates channel/account/chat",
+			want: "duplicates channel/account",
 		},
 		{
 			name: "重复聊天绑定",
@@ -126,6 +143,32 @@ func TestLoadFileStrictValidation(t *testing.T) {
     agent_id: lucky
 `,
 			want: "duplicates channel/account/chat",
+		},
+		{
+			name: "重复线程绑定",
+			content: validConfigYAML + `
+  - channel: feishu
+    account_id: bot
+    chat_id: coder-chat
+    thread_id: topic-1
+    agent_id: lucky
+  - channel: feishu
+    account_id: bot
+    chat_id: coder-chat
+    thread_id: topic-1
+    agent_id: coder
+`,
+			want: "duplicates channel/account/chat/thread",
+		},
+		{
+			name: "线程绑定缺少聊天",
+			content: validConfigYAML + `
+  - channel: feishu
+    account_id: bot
+    thread_id: topic-1
+    agent_id: lucky
+`,
+			want: "thread_id requires chat_id",
 		},
 		{
 			name:    "Provider 模型目录为空",
