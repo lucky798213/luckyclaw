@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"lukcyclaw/internal/provider"
+	"github.com/lucky798213/luckyclaw/internal/provider"
 )
 
 type managerTestProvider struct{}

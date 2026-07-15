@@ -10,9 +10,9 @@ import (
 	"sort"
 	"strings"
 
-	"lukcyclaw/internal/bus"
-	"lukcyclaw/internal/provider"
-	"lukcyclaw/internal/session"
+	"github.com/lucky798213/luckyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/provider"
+	"github.com/lucky798213/luckyclaw/internal/session"
 )
 
 const handleMessageErrorReply = "抱歉，消息处理失败，请稍后重试。"

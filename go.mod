@@ -1,4 +1,4 @@
-module lukcyclaw
+module github.com/lucky798213/luckyclaw
 
 go 1.26
 

@@ -13,8 +13,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"lukcyclaw/internal/bus"
-	"lukcyclaw/internal/provider"
+	"github.com/lucky798213/luckyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/provider"
 )
 
 var errSessionNotFound = errors.New("session not found")

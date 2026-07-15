@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"lukcyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/bus"
 )
 
 func TestTerminalConvertsInputToInboundMessage(t *testing.T) {

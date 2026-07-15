@@ -9,13 +9,13 @@ import (
 	"sort"
 	"syscall"
 
-	"lukcyclaw/internal/agent"
-	"lukcyclaw/internal/bus"
-	"lukcyclaw/internal/channels"
-	"lukcyclaw/internal/config"
-	"lukcyclaw/internal/gateway"
-	"lukcyclaw/internal/provider"
-	"lukcyclaw/internal/session"
+	"github.com/lucky798213/luckyclaw/internal/agent"
+	"github.com/lucky798213/luckyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/channels"
+	"github.com/lucky798213/luckyclaw/internal/config"
+	"github.com/lucky798213/luckyclaw/internal/gateway"
+	"github.com/lucky798213/luckyclaw/internal/provider"
+	"github.com/lucky798213/luckyclaw/internal/session"
 )
 
 func main() {

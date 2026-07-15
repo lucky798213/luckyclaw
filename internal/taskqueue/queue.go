@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"lukcyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/bus"
 )
 
 var (

@@ -6,7 +6,7 @@ import (
 	"log"
 	"sync"
 
-	"lukcyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/bus"
 )
 
 // Manager 管理所有平台实例，并按照平台和账号分发出站消息。

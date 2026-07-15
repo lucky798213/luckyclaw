@@ -4,7 +4,7 @@ package channels
 import (
 	"context"
 
-	"lukcyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/bus"
 )
 
 // Channel 是所有平台适配器需要实现的最小接口。

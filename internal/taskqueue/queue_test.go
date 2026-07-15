@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"lukcyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/bus"
 )
 
 func testMessage(address bus.ConversationAddress, text string) bus.InboundMessage {

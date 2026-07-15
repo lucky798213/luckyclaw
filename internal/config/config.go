@@ -10,8 +10,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"lukcyclaw/internal/bus"
-	"lukcyclaw/internal/provider"
+	"github.com/lucky798213/luckyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/provider"
 )
 
 const defaultConfigPath = "config.yaml"
@@ -20,7 +20,7 @@ const (
 	defaultTaskQueueMaxConcurrent             = 10
 	defaultTaskQueueTimeoutSeconds            = 30
 	defaultTaskQueueMaxPendingPerConversation = 100
-	defaultStoragePath                        = "data/lukcyclaw.db"
+	defaultStoragePath                        = "data/luckyclaw.db"
 )
 
 // Config 保存 LuckyClaw 的运行配置。
@@ -67,10 +67,12 @@ func (c TaskQueueConfig) WithDefaults() TaskQueueConfig {
 	return c
 }
 
-// ProviderConfig 保存一个大模型服务商的连接配置。描述 YAML 长什么样
+// ProviderConfig 保存一个大模型服务商的连接配置。
 type ProviderConfig struct {
-	// APIKey 是调用服务商接口使用的密钥。
-	APIKey string `yaml:"api_key"`
+	// APIKeyEnv 是保存服务商密钥的环境变量名。
+	APIKeyEnv string `yaml:"api_key_env"`
+	// APIKey 是从环境变量解析出的运行时密钥，不从 YAML 读取。
+	APIKey string `yaml:"-"`
 	// APIBase 是服务商 API 地址。
 	APIBase string `yaml:"api_base"`
 	// APIType 是接口协议类型，决定创建哪种 Provider 实现。
@@ -116,6 +118,9 @@ func LoadFile(path string) (*Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("decode config file %q: %w", path, err)
 	}
+	if err := resolveProviderAPIKeys(&cfg); err != nil {
+		return nil, fmt.Errorf("resolve config file %q: %w", path, err)
+	}
 	cfg.TaskQueue = cfg.TaskQueue.WithDefaults()
 	cfg.Storage = cfg.Storage.WithDefaults()
 
@@ -124,6 +129,25 @@ func LoadFile(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// resolveProviderAPIKeys 按 Provider 配置的环境变量名解析运行时密钥。
+func resolveProviderAPIKeys(cfg *Config) error {
+	for _, name := range sortedKeys(cfg.Providers) {
+		providerCfg := cfg.Providers[name]
+		envName := strings.TrimSpace(providerCfg.APIKeyEnv)
+		if envName == "" {
+			return fmt.Errorf("provider %q: api_key_env is required", name)
+		}
+		apiKey, exists := os.LookupEnv(envName)
+		if !exists || strings.TrimSpace(apiKey) == "" {
+			return fmt.Errorf("provider %q: environment variable %q is not set or empty", name, envName)
+		}
+		providerCfg.APIKeyEnv = envName
+		providerCfg.APIKey = apiKey
+		cfg.Providers[name] = providerCfg
+	}
+	return nil
 }
 
 func validate(cfg *Config) error {

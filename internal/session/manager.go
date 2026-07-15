@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"lukcyclaw/internal/bus"
-	"lukcyclaw/internal/provider"
+	"github.com/lucky798213/luckyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/provider"
 )
 
 // Manager 管理一个 Agent 的所有会话。

@@ -8,10 +8,10 @@ import (
 	"log"
 	"time"
 
-	"lukcyclaw/internal/agent"
-	"lukcyclaw/internal/bus"
-	"lukcyclaw/internal/config"
-	"lukcyclaw/internal/taskqueue"
+	"github.com/lucky798213/luckyclaw/internal/agent"
+	"github.com/lucky798213/luckyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/config"
+	"github.com/lucky798213/luckyclaw/internal/taskqueue"
 )
 
 // Gateway 是平台渠道和多个 Agent 之间的统一消息入口。

@@ -29,7 +29,7 @@ type Message struct {
 	Name string `json:"name,omitempty"`
 
 	// assistant 消息：模型返回的原始 JSON
-	// FastClaw 用于提示词缓存和 Provider 兼容
+	// LuckyClaw 用于提示词缓存和 Provider 兼容
 	RawAssistant json.RawMessage `json:"_raw,omitempty"`
 }
 

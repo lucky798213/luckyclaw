@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"lukcyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/bus"
 )
 
 func inboundMessage(address bus.ConversationAddress, messageID string) bus.InboundMessage {

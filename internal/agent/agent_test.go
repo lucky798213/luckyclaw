@@ -12,9 +12,9 @@ import (
 	"sync"
 	"testing"
 
-	"lukcyclaw/internal/bus"
-	"lukcyclaw/internal/provider"
-	"lukcyclaw/internal/session"
+	"github.com/lucky798213/luckyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/provider"
+	"github.com/lucky798213/luckyclaw/internal/session"
 )
 
 type fakeProvider struct {

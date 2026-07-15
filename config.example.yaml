@@ -1,6 +1,6 @@
 providers:
   deepseek:
-    api_key: your-api-key
+    api_key_env: DEEPSEEK_API_KEY
     api_base: https://api.deepseek.com/v1
     api_type: openai-chat
     auth_type: bearer-token
@@ -21,7 +21,7 @@ default_agent: lucky
 
 # 会话数据库路径；相对路径以进程启动目录为基准。
 storage:
-  path: data/lukcyclaw.db
+  path: data/luckyclaw.db
 
 # 以下字段省略或填写 0 时使用默认值：10、30 秒、每个会话等待 100 条。
 task_queue:

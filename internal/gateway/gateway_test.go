@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"lukcyclaw/internal/agent"
-	"lukcyclaw/internal/bus"
-	"lukcyclaw/internal/config"
-	"lukcyclaw/internal/provider"
+	"github.com/lucky798213/luckyclaw/internal/agent"
+	"github.com/lucky798213/luckyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/config"
+	"github.com/lucky798213/luckyclaw/internal/provider"
 )
 
 type fakeProvider struct {

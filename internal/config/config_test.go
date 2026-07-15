@@ -10,7 +10,7 @@ import (
 const validConfigYAML = `
 providers:
   deepseek:
-    api_key: deepseek-key
+    api_key_env: DEEPSEEK_API_KEY
     api_base: https://deepseek.example/v1
     api_type: openai-chat
     auth_type: bearer-token
@@ -18,7 +18,7 @@ providers:
       - deepseek-chat
       - deepseek-reasoner
   openrouter:
-    api_key: openrouter-key
+    api_key_env: OPENROUTER_API_KEY
     api_base: https://openrouter.example/v1
     api_type: openai
     auth_type: bearer
@@ -51,6 +51,8 @@ bindings:
 
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
+	t.Setenv("DEEPSEEK_API_KEY", "deepseek-key")
+	t.Setenv("OPENROUTER_API_KEY", "openrouter-key")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -65,6 +67,9 @@ func TestLoadFileLoadsMultipleProvidersAgentsAndBindings(t *testing.T) {
 	}
 	if len(cfg.Providers) != 2 || len(cfg.Agents) != 2 {
 		t.Fatalf("providers = %d, agents = %d", len(cfg.Providers), len(cfg.Agents))
+	}
+	if got := cfg.Providers["deepseek"]; got.APIKeyEnv != "DEEPSEEK_API_KEY" || got.APIKey != "deepseek-key" {
+		t.Fatalf("deepseek provider = %+v", got)
 	}
 	if cfg.DefaultAgent != "lucky" {
 		t.Fatalf("default agent = %q", cfg.DefaultAgent)
@@ -83,9 +88,60 @@ func TestLoadFileLoadsMultipleProvidersAgentsAndBindings(t *testing.T) {
 	if cfg.TaskQueue != wantTaskQueue {
 		t.Fatalf("task queue = %+v, want %+v", cfg.TaskQueue, wantTaskQueue)
 	}
-	if cfg.Storage.Path != "data/lukcyclaw.db" {
+	if cfg.Storage.Path != "data/luckyclaw.db" {
 		t.Fatalf("storage path = %q", cfg.Storage.Path)
 	}
+}
+
+func TestLoadFileRequiresProviderAPIKeyEnv(t *testing.T) {
+	content := strings.Replace(validConfigYAML, "    api_key_env: DEEPSEEK_API_KEY\n", "", 1)
+	_, err := LoadFile(writeConfig(t, content))
+	if err == nil || !strings.Contains(err.Error(), `provider "deepseek": api_key_env is required`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadFileRejectsMissingProviderAPIKeyEnvironmentVariable(t *testing.T) {
+	const envName = "LUCKYCLAW_TEST_MISSING_API_KEY"
+	unsetEnv(t, envName)
+	content := strings.Replace(validConfigYAML, "DEEPSEEK_API_KEY", envName, 1)
+	_, err := LoadFile(writeConfig(t, content))
+	if err == nil || !strings.Contains(err.Error(), `environment variable "`+envName+`" is not set or empty`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadFileRejectsEmptyProviderAPIKeyEnvironmentVariable(t *testing.T) {
+	const envName = "LUCKYCLAW_TEST_EMPTY_API_KEY"
+	t.Setenv(envName, "   ")
+	content := strings.Replace(validConfigYAML, "DEEPSEEK_API_KEY", envName, 1)
+	_, err := LoadFile(writeConfig(t, content))
+	if err == nil || !strings.Contains(err.Error(), `environment variable "`+envName+`" is not set or empty`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLoadFileRejectsInlineProviderAPIKey(t *testing.T) {
+	content := strings.Replace(validConfigYAML, "api_key_env: DEEPSEEK_API_KEY", "api_key: secret", 1)
+	_, err := LoadFile(writeConfig(t, content))
+	if err == nil || !strings.Contains(err.Error(), "field api_key not found") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func unsetEnv(t *testing.T, name string) {
+	t.Helper()
+	value, exists := os.LookupEnv(name)
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if exists {
+			_ = os.Setenv(name, value)
+			return
+		}
+		_ = os.Unsetenv(name)
+	})
 }
 
 func TestLoadFileLoadsStoragePath(t *testing.T) {

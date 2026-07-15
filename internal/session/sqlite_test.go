@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"testing"
 
-	"lukcyclaw/internal/bus"
-	"lukcyclaw/internal/provider"
+	"github.com/lucky798213/luckyclaw/internal/bus"
+	"github.com/lucky798213/luckyclaw/internal/provider"
 )
 
 func openTestSQLite(t *testing.T, path string) *SQLiteStore {
