@@ -79,6 +79,16 @@ func sendAndReceive(t *testing.T, messageBus *bus.MessageBus, in bus.InboundMess
 	}
 }
 
+func assertNoOutbound(t *testing.T, messageBus *bus.MessageBus) {
+	t.Helper()
+
+	select {
+	case out := <-messageBus.Outbound:
+		t.Fatalf("收到非预期的出站消息: %+v", out)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestGatewayConvertsInboundToOutbound(t *testing.T) {
 	gateway, messageBus := newTestGateway(t, nil)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -170,6 +180,66 @@ func TestGatewayRejectsUnknownExplicitAgent(t *testing.T) {
 	if !strings.Contains(out.Text, "没有找到指定的 Agent") {
 		t.Fatalf("reply = %q", out.Text)
 	}
+}
+
+func TestGatewayDeduplicatesInboundMessages(t *testing.T) {
+	gateway, messageBus := newTestGateway(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go gateway.Run(ctx)
+
+	msg := bus.InboundMessage{
+		Channel:   "feishu",
+		AccountID: "bot",
+		ChatID:    "chat-1",
+		ThreadID:  "topic-1",
+		MessageID: "message-1",
+		Text:      "hello",
+	}
+	if out := sendAndReceive(t, messageBus, msg); out.Text != "default reply" {
+		t.Fatalf("首次消息回复 = %q", out.Text)
+	}
+	messageBus.Inbound <- msg
+	assertNoOutbound(t, messageBus)
+}
+
+func TestGatewayDedupKeepsConversationsIsolated(t *testing.T) {
+	gateway, messageBus := newTestGateway(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go gateway.Run(ctx)
+
+	messages := []bus.InboundMessage{
+		{Channel: "feishu", AccountID: "bot", ChatID: "chat-1", ThreadID: "topic-1", MessageID: "shared-message", Text: "hello"},
+		{Channel: "feishu", AccountID: "bot", ChatID: "chat-1", ThreadID: "topic-2", MessageID: "shared-message", Text: "hello"},
+		{Channel: "feishu", AccountID: "bot", ChatID: "chat-2", ThreadID: "topic-1", MessageID: "shared-message", Text: "hello"},
+	}
+	for _, msg := range messages {
+		if out := sendAndReceive(t, messageBus, msg); out.Text != "default reply" {
+			t.Fatalf("地址 %+v 的回复 = %q", msg.Address(), out.Text)
+		}
+	}
+}
+
+func TestGatewayDeduplicatesBeforeAgentMatching(t *testing.T) {
+	gateway, messageBus := newTestGateway(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go gateway.Run(ctx)
+
+	msg := bus.InboundMessage{
+		Channel:   "terminal",
+		AccountID: "local",
+		ChatID:    "default",
+		MessageID: "message-1",
+		AgentID:   "missing",
+		Text:      "hello",
+	}
+	if out := sendAndReceive(t, messageBus, msg); !strings.Contains(out.Text, "没有找到指定的 Agent") {
+		t.Fatalf("首次消息回复 = %q", out.Text)
+	}
+	messageBus.Inbound <- msg
+	assertNoOutbound(t, messageBus)
 }
 
 func TestGatewayValidatesBindings(t *testing.T) {

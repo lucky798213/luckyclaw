@@ -4,6 +4,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"lukcyclaw/internal/agent"
@@ -20,6 +21,7 @@ type Gateway struct {
 	threadBindings  map[bus.ConversationAddress]string
 	chatBindings    map[bus.ConversationAddress]string
 	accountBindings map[bus.ChannelAccount]string
+	deduper         *messageDeduper
 	messageTimeout  time.Duration
 }
 
@@ -81,16 +83,23 @@ func New(messageBus *bus.MessageBus, agents *agent.Manager, bindings []config.Bi
 		threadBindings:  threadBindings,
 		chatBindings:    chatBindings,
 		accountBindings: accountBindings,
+		deduper:         newMessageDeduper(defaultDedupTTL),
 		messageTimeout:  defaultMessageTimeout,
 	}, nil
 }
 
 // Run 串行消费入站消息。后续需要并发时，可以在这里增加按会话分组的任务队列。
 func (g *Gateway) Run(ctx context.Context) {
+	// 创建定时触发器
+	cleanupTicker := time.NewTicker(dedupCleanupInterval)
+	defer cleanupTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-cleanupTicker.C:
+			g.deduper.cleanup()
 		case msg := <-g.bus.Inbound:
 			g.handleInbound(ctx, msg)
 		}
@@ -98,7 +107,19 @@ func (g *Gateway) Run(ctx context.Context) {
 }
 
 func (g *Gateway) handleInbound(ctx context.Context, msg bus.InboundMessage) {
-	//匹配 agent
+	if g.deduper.isDuplicate(msg) {
+		log.Printf(
+			"忽略重复入站消息: channel=%s account_id=%s chat_id=%s thread_id=%s message_id=%s",
+			msg.Channel,
+			msg.AccountID,
+			msg.ChatID,
+			msg.ThreadID,
+			msg.MessageID,
+		)
+		return
+	}
+
+	// 匹配 Agent。
 	target, err := g.matchAgent(msg)
 	var reply string
 	if err != nil {
