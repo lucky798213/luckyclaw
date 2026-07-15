@@ -3,3 +3,7 @@
 /data/*.db
 /data/*.db-shm
 /data/*.db-wal
+/luckyclaw
+/coverage.out
+/coverage.html
+/coverage.txt

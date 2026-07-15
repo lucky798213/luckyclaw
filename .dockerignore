@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+.DS_Store
+config.yaml
+data
+coverage.out
+coverage.html
+coverage.txt
+luckyclaw
+*.db
+*.db-shm
+*.db-wal
