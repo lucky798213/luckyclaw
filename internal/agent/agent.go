@@ -26,6 +26,7 @@ type Options struct {
 	SoulPath     string
 	MaxTokens    int
 	Temperature  float64
+	SessionStore session.Store
 }
 
 // Agent 表示一个可以在模型白名单中选择模型的大模型智能体。
@@ -109,7 +110,7 @@ func New(options Options, providers *provider.Manager) (*Agent, error) {
 		allowedModels:   allowed,
 		allowedModelSet: allowedSet,
 		providers:       providers,
-		sessionsManager: session.NewManager(),
+		sessionsManager: session.NewManager(options.ID, options.SessionStore),
 		soulPath:        options.SoulPath,
 		maxTokens:       maxTokens,
 		temperature:     temperature,
@@ -121,11 +122,15 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	address := msg.Address()
 	trimmed := strings.TrimSpace(msg.Text)
 	if trimmed == "/new" {
-		newSession := a.sessionsManager.NewSession(address)
+		newSession, err := a.sessionsManager.NewSession(ctx, address)
+		if err != nil {
+			log.Printf("Agent %s 创建新会话失败: %v", a.id, err)
+			return handleMessageErrorReply
+		}
 		return fmt.Sprintf("新会话已开始: %s", newSession.Key())
 	}
 	if fields := strings.Fields(trimmed); len(fields) > 0 && fields[0] == "/model" {
-		return a.handleModelCommand(address, fields[1:])
+		return a.handleModelCommand(ctx, address, fields[1:])
 	}
 
 	reply, err := a.handleMessage(ctx, msg)
@@ -140,8 +145,12 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	return reply.Content
 }
 
-func (a *Agent) handleModelCommand(address bus.ConversationAddress, args []string) string {
-	currentSession := a.sessionsManager.CurrentSession(address)
+func (a *Agent) handleModelCommand(ctx context.Context, address bus.ConversationAddress, args []string) string {
+	currentSession, err := a.sessionsManager.CurrentSession(ctx, address)
+	if err != nil {
+		log.Printf("Agent %s 加载会话失败: %v", a.id, err)
+		return handleMessageErrorReply
+	}
 	if len(args) == 0 || (len(args) == 1 && args[0] == "list") {
 		current := currentSession.ModelRef()
 		if current == "" {
@@ -155,14 +164,20 @@ func (a *Agent) handleModelCommand(address bus.ConversationAddress, args []strin
 		return "用法: /model、/model list、/model <provider/model> 或 /model default"
 	}
 	if args[0] == "default" {
-		currentSession.ClearModelRef()
+		if err := currentSession.ClearModelRef(ctx); err != nil {
+			log.Printf("Agent %s 清除会话模型失败: %v", a.id, err)
+			return handleMessageErrorReply
+		}
 		return fmt.Sprintf("已恢复默认模型: %s", a.defaultModel)
 	}
 	modelRef, err := a.validateAllowedModel(args[0])
 	if err != nil {
 		return err.Error()
 	}
-	currentSession.SetModelRef(modelRef)
+	if err := currentSession.SetModelRef(ctx, modelRef); err != nil {
+		log.Printf("Agent %s 保存会话模型失败: %v", a.id, err)
+		return handleMessageErrorReply
+	}
 	return fmt.Sprintf("当前会话模型已切换为: %s", modelRef)
 }
 
@@ -173,7 +188,10 @@ func (a *Agent) handleMessage(ctx context.Context, msg bus.InboundMessage) (*pro
 		return nil, fmt.Errorf("read soul: %w", err)
 	}
 
-	currentSession := a.sessionsManager.CurrentSession(msg.Address())
+	currentSession, err := a.sessionsManager.CurrentSession(ctx, msg.Address())
+	if err != nil {
+		return nil, fmt.Errorf("load session: %w", err)
+	}
 	selectedModel := msg.ModelRef
 	if selectedModel == "" {
 		selectedModel = currentSession.ModelRef()
@@ -209,7 +227,9 @@ func (a *Agent) handleMessage(ctx context.Context, msg bus.InboundMessage) (*pro
 		return nil, err
 	}
 
-	currentSession.Append(userMessage, *assistantMessage)
+	if err := currentSession.Append(ctx, userMessage, *assistantMessage); err != nil {
+		return nil, fmt.Errorf("save session messages: %w", err)
+	}
 	return assistantMessage, nil
 }
 

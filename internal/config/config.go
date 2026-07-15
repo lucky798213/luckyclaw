@@ -20,6 +20,7 @@ const (
 	defaultTaskQueueMaxConcurrent             = 10
 	defaultTaskQueueTimeoutSeconds            = 30
 	defaultTaskQueueMaxPendingPerConversation = 100
+	defaultStoragePath                        = "data/lukcyclaw.db"
 )
 
 // Config 保存 LuckyClaw 的运行配置。
@@ -29,6 +30,20 @@ type Config struct {
 	DefaultAgent string                    `yaml:"default_agent"`
 	Bindings     []BindingConfig           `yaml:"bindings"`
 	TaskQueue    TaskQueueConfig           `yaml:"task_queue,omitempty"`
+	Storage      StorageConfig             `yaml:"storage,omitempty"`
+}
+
+// StorageConfig 保存本地持久化配置。
+type StorageConfig struct {
+	Path string `yaml:"path,omitempty"`
+}
+
+// WithDefaults 返回补齐默认数据库路径后的存储配置。
+func (c StorageConfig) WithDefaults() StorageConfig {
+	if c.Path == "" {
+		c.Path = defaultStoragePath
+	}
+	return c
 }
 
 // TaskQueueConfig 保存 Gateway 任务队列的并发、超时和积压限制。
@@ -102,6 +117,7 @@ func LoadFile(path string) (*Config, error) {
 		return nil, fmt.Errorf("decode config file %q: %w", path, err)
 	}
 	cfg.TaskQueue = cfg.TaskQueue.WithDefaults()
+	cfg.Storage = cfg.Storage.WithDefaults()
 
 	if err := validate(&cfg); err != nil {
 		return nil, fmt.Errorf("validate config file %q: %w", path, err)
@@ -111,6 +127,9 @@ func LoadFile(path string) (*Config, error) {
 }
 
 func validate(cfg *Config) error {
+	if strings.TrimSpace(cfg.Storage.Path) == "" {
+		return fmt.Errorf("storage.path cannot be empty")
+	}
 	if cfg.TaskQueue.MaxConcurrent <= 0 {
 		return fmt.Errorf("task_queue.max_concurrent must be greater than zero")
 	}

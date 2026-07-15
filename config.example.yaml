@@ -19,6 +19,10 @@ agents:
 
 default_agent: lucky
 
+# 会话数据库路径；相对路径以进程启动目录为基准。
+storage:
+  path: data/lukcyclaw.db
+
 # 以下字段省略或填写 0 时使用默认值：10、30 秒、每个会话等待 100 条。
 task_queue:
   max_concurrent: 10

@@ -1,2 +1,5 @@
 .idea/
 /config.yaml
+/data/*.db
+/data/*.db-shm
+/data/*.db-wal

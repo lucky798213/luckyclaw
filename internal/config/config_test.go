@@ -83,6 +83,22 @@ func TestLoadFileLoadsMultipleProvidersAgentsAndBindings(t *testing.T) {
 	if cfg.TaskQueue != wantTaskQueue {
 		t.Fatalf("task queue = %+v, want %+v", cfg.TaskQueue, wantTaskQueue)
 	}
+	if cfg.Storage.Path != "data/lukcyclaw.db" {
+		t.Fatalf("storage path = %q", cfg.Storage.Path)
+	}
+}
+
+func TestLoadFileLoadsStoragePath(t *testing.T) {
+	content := strings.Replace(validConfigYAML, "default_agent: lucky", `default_agent: lucky
+storage:
+  path: var/sessions.db`, 1)
+	cfg, err := LoadFile(writeConfig(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Storage.Path != "var/sessions.db" {
+		t.Fatalf("storage path = %q", cfg.Storage.Path)
+	}
 }
 
 func TestLoadFileLoadsTaskQueueConfig(t *testing.T) {
@@ -228,6 +244,13 @@ task_queue:
 task_queue:
   max_pending_per_conversation: -1`, 1),
 			want: "task_queue.max_pending_per_conversation",
+		},
+		{
+			name: "数据库路径只有空白",
+			content: strings.Replace(validConfigYAML, "default_agent: lucky", `default_agent: lucky
+storage:
+  path: "   "`, 1),
+			want: "storage.path",
 		},
 	}
 	for _, test := range tests {

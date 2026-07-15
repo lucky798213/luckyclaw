@@ -15,6 +15,7 @@ import (
 	"lukcyclaw/internal/config"
 	"lukcyclaw/internal/gateway"
 	"lukcyclaw/internal/provider"
+	"lukcyclaw/internal/session"
 )
 
 func main() {
@@ -28,7 +29,17 @@ func main() {
 		log.Fatal(err)
 	}
 
-	agents, err := buildAgents(cfg.Agents, providerManager)
+	sessionStore, err := session.OpenSQLite(cfg.Storage.Path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := sessionStore.Close(); err != nil {
+			log.Printf("关闭会话数据库失败: %v", err)
+		}
+	}()
+
+	agents, err := buildAgents(cfg.Agents, providerManager, sessionStore)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -59,13 +70,32 @@ func main() {
 	ctx, cancel := context.WithCancel(signalCtx)
 	defer cancel()
 
-	go messageGateway.Run(ctx)
+	gatewayDone := make(chan struct{})
+	go func() {
+		defer close(gatewayDone)
+		messageGateway.Run(ctx)
+	}()
 	channelManager.Start(ctx)
 
+	waitForShutdown(signalCtx, terminal.Done(), gatewayDone, cancel)
+}
+
+// waitForShutdown 统一处理退出信号，并等待 Gateway 完成任务取消和资源清理。
+func waitForShutdown(
+	signalCtx context.Context,
+	terminalDone <-chan struct{},
+	gatewayDone <-chan struct{},
+	cancel context.CancelFunc,
+) {
 	select {
 	case <-signalCtx.Done():
-	case <-terminal.Done():
+	case <-terminalDone:
+	case <-gatewayDone:
+		cancel()
+		return
 	}
+	cancel()
+	<-gatewayDone
 }
 
 func providerDefinitions(configs map[string]config.ProviderConfig) map[string]provider.Definition {
@@ -82,7 +112,11 @@ func providerDefinitions(configs map[string]config.ProviderConfig) map[string]pr
 	return definitions
 }
 
-func buildAgents(configs map[string]config.AgentConfig, providers *provider.Manager) (map[string]*agent.Agent, error) {
+func buildAgents(
+	configs map[string]config.AgentConfig,
+	providers *provider.Manager,
+	sessionStore session.Store,
+) (map[string]*agent.Agent, error) {
 	ids := make([]string, 0, len(configs))
 	for id := range configs {
 		ids = append(ids, id)
@@ -98,6 +132,7 @@ func buildAgents(configs map[string]config.AgentConfig, providers *provider.Mana
 			DefaultModel: agentCfg.DefaultModel,
 			Models:       agentCfg.Models,
 			SoulPath:     agentCfg.SoulPath,
+			SessionStore: sessionStore,
 		}, providers)
 		if err != nil {
 			return nil, fmt.Errorf("创建 Agent %q: %w", id, err)

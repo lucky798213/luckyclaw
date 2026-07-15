@@ -2,6 +2,7 @@
 package session
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -12,79 +13,123 @@ import (
 	"lukcyclaw/internal/provider"
 )
 
-// Manager 管理 Agent 的所有会话。
+// Manager 管理一个 Agent 的所有会话。
 type Manager struct {
 	mu         sync.RWMutex
+	agentID    string
+	store      Store
 	sessions   map[string]*Session
 	activeKeys map[bus.ConversationAddress]string
 }
 
 // Session 保存一段独立的会话历史。
-// Message 中只存 user 和模型回答
+// Message 中只存 user 和模型回答。
 type Session struct {
 	mu       sync.RWMutex
+	agentID  string
+	store    Store
 	key      string
 	address  bus.ConversationAddress
 	modelRef string
 	messages []provider.Message
 }
 
-// NewManager 创建一个内存会话管理器。
-func NewManager() *Manager {
+// NewManager 创建一个会话管理器；store 为空时仅在内存中保存，供单元测试使用。
+func NewManager(agentID string, store Store) *Manager {
 	return &Manager{
+		agentID:    agentID,
+		store:      store,
 		sessions:   make(map[string]*Session),
 		activeKeys: make(map[bus.ConversationAddress]string),
 	}
 }
 
 // NewSession 为指定平台会话创建并切换到一段新的上下文。
-func (m *Manager) NewSession(address bus.ConversationAddress) *Session {
+func (m *Manager) NewSession(ctx context.Context, address bus.ConversationAddress) (*Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.createSessionLocked(ctx, address)
+}
+
+// CurrentSession 返回指定平台会话的当前上下文；不存在时自动创建。
+func (m *Manager) CurrentSession(ctx context.Context, address bus.ConversationAddress) (*Session, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if activeKey, ok := m.activeKeys[address]; ok {
+		if current, exists := m.sessions[activeKey]; exists {
+			return current, nil
+		}
+	}
+
+	if m.store != nil {
+		record, exists, err := m.store.LoadActive(ctx, m.agentID, address)
+		if err != nil {
+			return nil, fmt.Errorf("load active session: %w", err)
+		}
+		if exists {
+			current := m.sessionFromRecord(record)
+			m.sessions[current.key] = current
+			m.activeKeys[address] = current.key
+			return current, nil
+		}
+	}
+
+	return m.createSessionLocked(ctx, address)
+}
+
+// Get 根据 Key 查找会话，不存在于内存时会尝试从持久化层加载。
+func (m *Manager) Get(ctx context.Context, key string) (*Session, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if current, ok := m.sessions[key]; ok {
+		return current, true, nil
+	}
+	if m.store == nil {
+		return nil, false, nil
+	}
+
+	record, exists, err := m.store.LoadByKey(ctx, m.agentID, key)
+	if err != nil {
+		return nil, false, fmt.Errorf("load session %q: %w", key, err)
+	}
+	if !exists {
+		return nil, false, nil
+	}
+	current := m.sessionFromRecord(record)
+	m.sessions[current.key] = current
+	return current, true, nil
+}
+
+func (m *Manager) createSessionLocked(ctx context.Context, address bus.ConversationAddress) (*Session, error) {
 	for {
 		key := generateKey()
 		if _, exists := m.sessions[key]; exists {
 			continue
 		}
 
-		s := &Session{
-			key:     key,
-			address: address,
+		record := Record{Key: key, Address: address, Messages: []provider.Message{}}
+		if m.store != nil {
+			if err := m.store.CreateAndActivate(ctx, m.agentID, record); err != nil {
+				return nil, fmt.Errorf("create session: %w", err)
+			}
 		}
-		m.sessions[key] = s
+		current := m.sessionFromRecord(record)
+		m.sessions[key] = current
 		m.activeKeys[address] = key
-		return s
+		return current, nil
 	}
 }
 
-// CurrentSession 返回指定平台会话的当前上下文；不存在时自动创建。
-func (m *Manager) CurrentSession(address bus.ConversationAddress) *Session {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if activeKey, ok := m.activeKeys[address]; ok {
-		if current, exists := m.sessions[activeKey]; exists {
-			return current
-		}
+func (m *Manager) sessionFromRecord(record Record) *Session {
+	return &Session{
+		agentID:  m.agentID,
+		store:    m.store,
+		key:      record.Key,
+		address:  record.Address,
+		modelRef: record.ModelRef,
+		messages: append([]provider.Message(nil), record.Messages...),
 	}
-
-	key := generateKey()
-	s := &Session{
-		key:     key,
-		address: address,
-	}
-	m.sessions[key] = s
-	m.activeKeys[address] = key
-	return s
-}
-
-// Get 根据 Key 查找会话。
-func (m *Manager) Get(key string) (*Session, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	s, ok := m.sessions[key]
-	return s, ok
 }
 
 // Key 返回会话 Key。
@@ -132,22 +177,40 @@ func (s *Session) ModelRef() string {
 }
 
 // SetModelRef 设置当前会话后续消息使用的模型。
-func (s *Session) SetModelRef(modelRef string) {
+func (s *Session) SetModelRef(ctx context.Context, modelRef string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.modelRef == modelRef {
+		return nil
+	}
+	if s.store != nil {
+		if err := s.store.UpdateModelRef(ctx, s.agentID, s.key, modelRef); err != nil {
+			return err
+		}
+	}
 	s.modelRef = modelRef
+	return nil
 }
 
 // ClearModelRef 清除会话模型覆盖，使后续消息恢复 Agent 默认模型。
-func (s *Session) ClearModelRef() {
-	s.SetModelRef("")
+func (s *Session) ClearModelRef(ctx context.Context) error {
+	return s.SetModelRef(ctx, "")
 }
 
-// Append 追加会话消息。
-func (s *Session) Append(messages ...provider.Message) {
+// Append 追加会话消息；持久化失败时不修改内存状态。
+func (s *Session) Append(ctx context.Context, messages ...provider.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.messages = append(s.messages, messages...)
+	next := make([]provider.Message, 0, len(s.messages)+len(messages))
+	next = append(next, s.messages...)
+	next = append(next, messages...)
+	if s.store != nil {
+		if err := s.store.UpdateMessages(ctx, s.agentID, s.key, next); err != nil {
+			return err
+		}
+	}
+	s.messages = next
+	return nil
 }
 
 // generateKey 生成会话 Key，例如 s-1752393600000-a1b2c3d4。

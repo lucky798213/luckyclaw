@@ -14,6 +14,7 @@ import (
 
 	"lukcyclaw/internal/bus"
 	"lukcyclaw/internal/provider"
+	"lukcyclaw/internal/session"
 )
 
 type fakeProvider struct {
@@ -404,6 +405,79 @@ func TestAgentCanCallDifferentProviderAPIBase(t *testing.T) {
 	if got := <-openaiModels; got != "gpt-4.1-mini" {
 		t.Fatalf("openai model = %q", got)
 	}
+}
+
+func TestAgentRestoresHistoryAndSessionModelAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	tempDir := t.TempDir()
+	soulPath := filepath.Join(tempDir, "SOUL.md")
+	databasePath := filepath.Join(tempDir, "sessions.db")
+	writeSoul(t, soulPath, "friendly")
+
+	firstStore, err := session.OpenSQLite(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDeepseek := &fakeProvider{}
+	firstOpenAI := &fakeProvider{reply: "first reply"}
+	firstProviders := newProviderManager(t, "deepseek", []string{"chat"}, firstDeepseek)
+	if err := firstProviders.Register("openai", firstOpenAI, []string{"mini"}); err != nil {
+		t.Fatal(err)
+	}
+	firstAgent, err := New(Options{
+		ID:           "lucky",
+		Name:         "LuckyClaw",
+		DefaultModel: "deepseek/chat",
+		Models:       []string{"deepseek/chat", "openai/mini"},
+		SoulPath:     soulPath,
+		SessionStore: firstStore,
+	}, firstProviders)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstAgent.HandleMessage(ctx, inbound("chat-1", "/model openai/mini"))
+	if got := firstAgent.HandleMessage(ctx, inbound("chat-1", "first")); got != "first reply" {
+		t.Fatalf("first reply = %q", got)
+	}
+	if err := firstStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	secondStore, err := session.OpenSQLite(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondStore.Close()
+	secondDeepseek := &fakeProvider{}
+	secondOpenAI := &fakeProvider{reply: "second reply"}
+	secondProviders := newProviderManager(t, "deepseek", []string{"chat"}, secondDeepseek)
+	if err := secondProviders.Register("openai", secondOpenAI, []string{"mini"}); err != nil {
+		t.Fatal(err)
+	}
+	secondAgent, err := New(Options{
+		ID:           "lucky",
+		Name:         "LuckyClaw",
+		DefaultModel: "deepseek/chat",
+		Models:       []string{"deepseek/chat", "openai/mini"},
+		SoulPath:     soulPath,
+		SessionStore: secondStore,
+	}, secondProviders)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := secondAgent.HandleMessage(ctx, inbound("chat-1", "second")); got != "second reply" {
+		t.Fatalf("second reply = %q", got)
+	}
+	if secondDeepseek.callCount() != 0 || secondOpenAI.callCount() != 1 {
+		t.Fatalf("provider calls after restart: deepseek=%d openai=%d", secondDeepseek.callCount(), secondOpenAI.callCount())
+	}
+	want := []provider.Message{
+		{Role: "system", Content: "friendly"},
+		{Role: "user", Content: "first"},
+		{Role: "assistant", Content: "first reply"},
+		{Role: "user", Content: "second"},
+	}
+	assertMessages(t, secondOpenAI.requests[0], want)
 }
 
 func assertMessages(t *testing.T, got, want []provider.Message) {

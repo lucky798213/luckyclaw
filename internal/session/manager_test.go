@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"testing"
 
 	"lukcyclaw/internal/bus"
@@ -11,35 +12,65 @@ func testAddress(channel, accountID, chatID string) bus.ConversationAddress {
 	return bus.ConversationAddress{Channel: channel, AccountID: accountID, ChatID: chatID}
 }
 
-func TestOpenCreatesIndependentSessions(t *testing.T) {
-	manager := NewManager()
-	address := testAddress("terminal", "local", "default")
-	first := manager.NewSession(address)
-	first.Append(provider.Message{Role: "user", Content: "hello"})
+func newMemoryManager() *Manager {
+	return NewManager("test-agent", nil)
+}
 
-	second := manager.NewSession(address)
+func requireCurrentSession(t *testing.T, manager *Manager, address bus.ConversationAddress) *Session {
+	t.Helper()
+	current, err := manager.CurrentSession(context.Background(), address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return current
+}
+
+func requireNewSession(t *testing.T, manager *Manager, address bus.ConversationAddress) *Session {
+	t.Helper()
+	current, err := manager.NewSession(context.Background(), address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return current
+}
+
+func TestOpenCreatesIndependentSessions(t *testing.T) {
+	manager := newMemoryManager()
+	address := testAddress("terminal", "local", "default")
+	first := requireNewSession(t, manager, address)
+	if err := first.Append(context.Background(), provider.Message{Role: "user", Content: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+
+	second := requireNewSession(t, manager, address)
 	if first.Key() == second.Key() {
 		t.Fatalf("new session reused key %q", first.Key())
 	}
 	if got := len(second.Messages()); got != 0 {
 		t.Fatalf("new session has %d messages, want 0", got)
 	}
-	if saved, ok := manager.Get(first.Key()); !ok || len(saved.Messages()) != 1 {
+	saved, ok, err := manager.Get(context.Background(), first.Key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || len(saved.Messages()) != 1 {
 		t.Fatal("old session was not kept in the sessions map")
 	}
 }
 
 func TestCurrentSessionIsolatesPlatformChats(t *testing.T) {
-	manager := NewManager()
-	first := manager.CurrentSession(testAddress("feishu", "bot-a", "chat-1"))
-	first.Append(provider.Message{Role: "user", Content: "hello"})
+	manager := newMemoryManager()
+	first := requireCurrentSession(t, manager, testAddress("feishu", "bot-a", "chat-1"))
+	if err := first.Append(context.Background(), provider.Message{Role: "user", Content: "hello"}); err != nil {
+		t.Fatal(err)
+	}
 
-	same := manager.CurrentSession(testAddress("feishu", "bot-a", "chat-1"))
+	same := requireCurrentSession(t, manager, testAddress("feishu", "bot-a", "chat-1"))
 	if same.Key() != first.Key() {
 		t.Fatal("same platform chat did not reuse its active session")
 	}
 
-	other := manager.CurrentSession(testAddress("feishu", "bot-a", "chat-2"))
+	other := requireCurrentSession(t, manager, testAddress("feishu", "bot-a", "chat-2"))
 	if other.Key() == first.Key() {
 		t.Fatal("different platform chats shared one session")
 	}
@@ -49,11 +80,13 @@ func TestCurrentSessionIsolatesPlatformChats(t *testing.T) {
 }
 
 func TestSessionModelSelectionIsThreadSafeAndIsolated(t *testing.T) {
-	manager := NewManager()
-	first := manager.CurrentSession(testAddress("feishu", "bot-a", "chat-1"))
-	second := manager.CurrentSession(testAddress("feishu", "bot-a", "chat-2"))
+	manager := newMemoryManager()
+	first := requireCurrentSession(t, manager, testAddress("feishu", "bot-a", "chat-1"))
+	second := requireCurrentSession(t, manager, testAddress("feishu", "bot-a", "chat-2"))
 
-	first.SetModelRef("deepseek/deepseek-reasoner")
+	if err := first.SetModelRef(context.Background(), "deepseek/deepseek-reasoner"); err != nil {
+		t.Fatal(err)
+	}
 	if got := first.ModelRef(); got != "deepseek/deepseek-reasoner" {
 		t.Fatalf("first model = %q", got)
 	}
@@ -61,19 +94,23 @@ func TestSessionModelSelectionIsThreadSafeAndIsolated(t *testing.T) {
 		t.Fatalf("second model = %q, want empty", got)
 	}
 
-	first.ClearModelRef()
+	if err := first.ClearModelRef(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if got := first.ModelRef(); got != "" {
 		t.Fatalf("cleared model = %q", got)
 	}
 }
 
 func TestNewSessionDoesNotInheritModelSelection(t *testing.T) {
-	manager := NewManager()
+	manager := newMemoryManager()
 	address := testAddress("terminal", "local", "default")
-	current := manager.CurrentSession(address)
-	current.SetModelRef("openrouter/vendor/model")
+	current := requireCurrentSession(t, manager, address)
+	if err := current.SetModelRef(context.Background(), "openrouter/vendor/model"); err != nil {
+		t.Fatal(err)
+	}
 
-	next := manager.NewSession(address)
+	next := requireNewSession(t, manager, address)
 	if got := next.ModelRef(); got != "" {
 		t.Fatalf("new session model = %q, want empty", got)
 	}
@@ -83,17 +120,17 @@ func TestNewSessionDoesNotInheritModelSelection(t *testing.T) {
 }
 
 func TestCurrentSessionIsolatesThreads(t *testing.T) {
-	manager := NewManager()
+	manager := newMemoryManager()
 	base := testAddress("telegram", "bot-a", "chat-1")
 	firstAddress := base
 	firstAddress.ThreadID = "topic-1"
 	secondAddress := base
 	secondAddress.ThreadID = "topic-2"
 
-	first := manager.CurrentSession(firstAddress)
-	same := manager.CurrentSession(firstAddress)
-	second := manager.CurrentSession(secondAddress)
-	baseSession := manager.CurrentSession(base)
+	first := requireCurrentSession(t, manager, firstAddress)
+	same := requireCurrentSession(t, manager, firstAddress)
+	second := requireCurrentSession(t, manager, secondAddress)
+	baseSession := requireCurrentSession(t, manager, base)
 
 	if same.Key() != first.Key() {
 		t.Fatal("同一线程没有复用活跃会话")
