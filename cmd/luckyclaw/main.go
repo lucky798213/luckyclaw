@@ -38,7 +38,7 @@ func main() {
 	}
 
 	messageBus := bus.New()
-	messageGateway, err := gateway.New(messageBus, agentManager, cfg.Bindings)
+	messageGateway, err := gateway.NewWithTaskQueueConfig(messageBus, agentManager, cfg.Bindings, cfg.TaskQueue)
 	if err != nil {
 		log.Fatal(err)
 	}

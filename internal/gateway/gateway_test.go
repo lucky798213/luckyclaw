@@ -22,7 +22,41 @@ func (p *fakeProvider) Chat(_ context.Context, _ []provider.Message, _ []provide
 	return &provider.Message{Role: "assistant", Content: p.reply}, nil
 }
 
+type controlledProvider struct {
+	started     chan string
+	releaseSlow chan struct{}
+}
+
+func (p *controlledProvider) Chat(ctx context.Context, messages []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.Message, error) {
+	text := messages[len(messages)-1].Content
+	p.started <- text
+	if text == "slow" {
+		select {
+		case <-p.releaseSlow:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return &provider.Message{Role: "assistant", Content: text + " reply"}, nil
+}
+
+type timeoutProvider struct {
+	started   chan struct{}
+	cancelled chan struct{}
+}
+
+func (p *timeoutProvider) Chat(ctx context.Context, _ []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.Message, error) {
+	close(p.started)
+	<-ctx.Done()
+	close(p.cancelled)
+	return nil, ctx.Err()
+}
+
 func newTestAgent(t *testing.T, id, reply string) *agent.Agent {
+	return newTestAgentWithProvider(t, id, &fakeProvider{reply: reply})
+}
+
+func newTestAgentWithProvider(t *testing.T, id string, currentProvider provider.Provider) *agent.Agent {
 	t.Helper()
 
 	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
@@ -30,7 +64,7 @@ func newTestAgent(t *testing.T, id, reply string) *agent.Agent {
 		t.Fatal(err)
 	}
 	providers := provider.NewManager()
-	if err := providers.Register(id, &fakeProvider{reply: reply}, []string{"chat"}); err != nil {
+	if err := providers.Register(id, currentProvider, []string{"chat"}); err != nil {
 		t.Fatal(err)
 	}
 	current, err := agent.New(agent.Options{
@@ -44,6 +78,31 @@ func newTestAgent(t *testing.T, id, reply string) *agent.Agent {
 		t.Fatal(err)
 	}
 	return current
+}
+
+func newControlledGateway(t *testing.T, currentProvider provider.Provider) (*Gateway, *bus.MessageBus) {
+	return newControlledGatewayWithTaskQueueConfig(t, currentProvider, config.TaskQueueConfig{})
+}
+
+func newControlledGatewayWithTaskQueueConfig(
+	t *testing.T,
+	currentProvider provider.Provider,
+	taskQueueConfig config.TaskQueueConfig,
+) (*Gateway, *bus.MessageBus) {
+	t.Helper()
+
+	agents, err := agent.NewManager(map[string]*agent.Agent{
+		"default": newTestAgentWithProvider(t, "default", currentProvider),
+	}, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageBus := bus.New()
+	current, err := NewWithTaskQueueConfig(messageBus, agents, nil, taskQueueConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return current, messageBus
 }
 
 func newTestGateway(t *testing.T, bindings []config.BindingConfig) (*Gateway, *bus.MessageBus) {
@@ -66,10 +125,20 @@ func newTestGateway(t *testing.T, bindings []config.BindingConfig) (*Gateway, *b
 	return current, messageBus
 }
 
-func sendAndReceive(t *testing.T, messageBus *bus.MessageBus, in bus.InboundMessage) bus.OutboundMessage {
+func inboundMessageWithText(address bus.ConversationAddress, messageID, text string) bus.InboundMessage {
+	return bus.InboundMessage{
+		Channel:   address.Channel,
+		AccountID: address.AccountID,
+		ChatID:    address.ChatID,
+		ThreadID:  address.ThreadID,
+		MessageID: messageID,
+		Text:      text,
+	}
+}
+
+func receiveOutbound(t *testing.T, messageBus *bus.MessageBus) bus.OutboundMessage {
 	t.Helper()
 
-	messageBus.Inbound <- in
 	select {
 	case out := <-messageBus.Outbound:
 		return out
@@ -79,6 +148,13 @@ func sendAndReceive(t *testing.T, messageBus *bus.MessageBus, in bus.InboundMess
 	}
 }
 
+func sendAndReceive(t *testing.T, messageBus *bus.MessageBus, in bus.InboundMessage) bus.OutboundMessage {
+	t.Helper()
+
+	messageBus.Inbound <- in
+	return receiveOutbound(t, messageBus)
+}
+
 func assertNoOutbound(t *testing.T, messageBus *bus.MessageBus) {
 	t.Helper()
 
@@ -86,6 +162,39 @@ func assertNoOutbound(t *testing.T, messageBus *bus.MessageBus) {
 	case out := <-messageBus.Outbound:
 		t.Fatalf("收到非预期的出站消息: %+v", out)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func receiveProviderStart(t *testing.T, started <-chan string) string {
+	t.Helper()
+	select {
+	case text := <-started:
+		return text
+	case <-time.After(time.Second):
+		t.Fatal("provider did not start")
+		return ""
+	}
+}
+
+func startGateway(t *testing.T, current *Gateway) (context.CancelFunc, <-chan struct{}) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		current.Run(ctx)
+		close(done)
+	}()
+	return cancel, done
+}
+
+func stopGateway(t *testing.T, cancel context.CancelFunc, done <-chan struct{}) {
+	t.Helper()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("gateway did not stop")
 	}
 }
 
@@ -240,6 +349,162 @@ func TestGatewayDeduplicatesBeforeAgentMatching(t *testing.T) {
 	}
 	messageBus.Inbound <- msg
 	assertNoOutbound(t, messageBus)
+}
+
+func TestGatewaySerializesMessagesFromSameConversation(t *testing.T) {
+	currentProvider := &controlledProvider{started: make(chan string, 2), releaseSlow: make(chan struct{})}
+	gateway, messageBus := newControlledGateway(t, currentProvider)
+	cancel, done := startGateway(t, gateway)
+	defer stopGateway(t, cancel, done)
+
+	address := bus.ConversationAddress{Channel: "feishu", AccountID: "bot", ChatID: "chat", ThreadID: "topic"}
+	messageBus.Inbound <- inboundMessageWithText(address, "message-1", "slow")
+	if got := receiveProviderStart(t, currentProvider.started); got != "slow" {
+		t.Fatalf("首个 Provider 请求 = %q", got)
+	}
+	messageBus.Inbound <- inboundMessageWithText(address, "message-2", "fast")
+	select {
+	case text := <-currentProvider.started:
+		t.Fatalf("首条消息完成前启动了第二条消息: %q", text)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(currentProvider.releaseSlow)
+	if out := receiveOutbound(t, messageBus); out.ReplyToMsgID != "message-1" {
+		t.Fatalf("第一条出站消息 = %+v", out)
+	}
+	if got := receiveProviderStart(t, currentProvider.started); got != "fast" {
+		t.Fatalf("第二个 Provider 请求 = %q", got)
+	}
+	if out := receiveOutbound(t, messageBus); out.ReplyToMsgID != "message-2" {
+		t.Fatalf("第二条出站消息 = %+v", out)
+	}
+}
+
+func TestGatewayRunsDifferentThreadsConcurrently(t *testing.T) {
+	currentProvider := &controlledProvider{started: make(chan string, 2), releaseSlow: make(chan struct{})}
+	gateway, messageBus := newControlledGateway(t, currentProvider)
+	cancel, done := startGateway(t, gateway)
+	defer stopGateway(t, cancel, done)
+
+	first := bus.ConversationAddress{Channel: "feishu", AccountID: "bot", ChatID: "chat", ThreadID: "topic-1"}
+	second := first
+	second.ThreadID = "topic-2"
+	messageBus.Inbound <- inboundMessageWithText(first, "message-1", "slow")
+	if got := receiveProviderStart(t, currentProvider.started); got != "slow" {
+		t.Fatalf("首个 Provider 请求 = %q", got)
+	}
+	messageBus.Inbound <- inboundMessageWithText(second, "message-2", "fast")
+	if got := receiveProviderStart(t, currentProvider.started); got != "fast" {
+		t.Fatalf("并发 Provider 请求 = %q", got)
+	}
+	if out := receiveOutbound(t, messageBus); out.ReplyToMsgID != "message-2" {
+		t.Fatalf("先完成的出站消息 = %+v", out)
+	}
+
+	close(currentProvider.releaseSlow)
+	if out := receiveOutbound(t, messageBus); out.ReplyToMsgID != "message-1" {
+		t.Fatalf("慢任务出站消息 = %+v", out)
+	}
+}
+
+func TestGatewayUsesConfiguredGlobalConcurrency(t *testing.T) {
+	currentProvider := &controlledProvider{started: make(chan string, 2), releaseSlow: make(chan struct{})}
+	gateway, messageBus := newControlledGatewayWithTaskQueueConfig(t, currentProvider, config.TaskQueueConfig{
+		MaxConcurrent:             1,
+		TaskTimeoutSeconds:        2,
+		MaxPendingPerConversation: 10,
+	})
+	cancel, done := startGateway(t, gateway)
+	defer stopGateway(t, cancel, done)
+
+	first := bus.ConversationAddress{Channel: "feishu", AccountID: "bot", ChatID: "chat", ThreadID: "topic-1"}
+	second := first
+	second.ThreadID = "topic-2"
+	messageBus.Inbound <- inboundMessageWithText(first, "message-1", "slow")
+	if got := receiveProviderStart(t, currentProvider.started); got != "slow" {
+		t.Fatalf("首个 Provider 请求 = %q", got)
+	}
+	messageBus.Inbound <- inboundMessageWithText(second, "message-2", "fast")
+	select {
+	case text := <-currentProvider.started:
+		t.Fatalf("全局并发槽释放前启动了第二个任务: %q", text)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(currentProvider.releaseSlow)
+	if out := receiveOutbound(t, messageBus); out.ReplyToMsgID != "message-1" {
+		t.Fatalf("首条出站消息 = %+v", out)
+	}
+	if got := receiveProviderStart(t, currentProvider.started); got != "fast" {
+		t.Fatalf("第二个 Provider 请求 = %q", got)
+	}
+	if out := receiveOutbound(t, messageBus); out.ReplyToMsgID != "message-2" {
+		t.Fatalf("第二条出站消息 = %+v", out)
+	}
+}
+
+func TestGatewayUsesConfiguredTaskTimeout(t *testing.T) {
+	currentProvider := &timeoutProvider{started: make(chan struct{}), cancelled: make(chan struct{})}
+	gateway, messageBus := newControlledGatewayWithTaskQueueConfig(t, currentProvider, config.TaskQueueConfig{
+		MaxConcurrent:             1,
+		TaskTimeoutSeconds:        1,
+		MaxPendingPerConversation: 10,
+	})
+	cancel, done := startGateway(t, gateway)
+	defer stopGateway(t, cancel, done)
+
+	messageBus.Inbound <- inboundMessageWithText(
+		bus.ConversationAddress{Channel: "feishu", AccountID: "bot", ChatID: "chat"},
+		"message-1",
+		"wait for timeout",
+	)
+	select {
+	case <-currentProvider.started:
+	case <-time.After(time.Second):
+		t.Fatal("Provider 没有开始执行")
+	}
+	select {
+	case <-currentProvider.cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("配置的任务超时没有取消 Provider")
+	}
+}
+
+func TestGatewayForgetsDedupEntryWhenConversationQueueIsFull(t *testing.T) {
+	currentProvider := &controlledProvider{started: make(chan string, 3), releaseSlow: make(chan struct{})}
+	gateway, messageBus := newControlledGatewayWithTaskQueueConfig(t, currentProvider, config.TaskQueueConfig{
+		MaxConcurrent:             1,
+		TaskTimeoutSeconds:        1,
+		MaxPendingPerConversation: 1,
+	})
+	defer gateway.taskQueue.Stop()
+
+	address := bus.ConversationAddress{Channel: "feishu", AccountID: "bot", ChatID: "chat"}
+	first := inboundMessageWithText(address, "message-1", "slow")
+	second := inboundMessageWithText(address, "message-2", "second")
+	retry := inboundMessageWithText(address, "message-3", "retry")
+	gateway.handleInbound(first)
+	if got := receiveProviderStart(t, currentProvider.started); got != "slow" {
+		t.Fatalf("首个 Provider 请求 = %q", got)
+	}
+	gateway.handleInbound(second)
+	gateway.handleInbound(retry)
+
+	close(currentProvider.releaseSlow)
+	receiveOutbound(t, messageBus)
+	if got := receiveProviderStart(t, currentProvider.started); got != "second" {
+		t.Fatalf("第二个 Provider 请求 = %q", got)
+	}
+	receiveOutbound(t, messageBus)
+
+	gateway.handleInbound(retry)
+	if got := receiveProviderStart(t, currentProvider.started); got != "retry" {
+		t.Fatalf("重试 Provider 请求 = %q", got)
+	}
+	if out := receiveOutbound(t, messageBus); out.ReplyToMsgID != retry.MessageID {
+		t.Fatalf("重试出站消息 = %+v", out)
+	}
 }
 
 func TestGatewayValidatesBindings(t *testing.T) {

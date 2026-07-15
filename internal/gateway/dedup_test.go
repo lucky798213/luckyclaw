@@ -36,6 +36,19 @@ func TestMessageDeduperAllowsOnlyFirstMessage(t *testing.T) {
 	}
 }
 
+func TestMessageDeduperForgetAllowsRetry(t *testing.T) {
+	deduper := newMessageDeduper(defaultDedupTTL)
+	msg := inboundMessage(bus.ConversationAddress{Channel: "feishu", AccountID: "bot", ChatID: "chat"}, "message-1")
+
+	if deduper.isDuplicate(msg) {
+		t.Fatal("首次消息被错误识别为重复消息")
+	}
+	deduper.forget(msg)
+	if deduper.isDuplicate(msg) {
+		t.Fatal("撤销登记后的消息没有被重新允许")
+	}
+}
+
 func TestMessageDeduperUsesFullConversationAddress(t *testing.T) {
 	deduper := newMessageDeduper(defaultDedupTTL)
 	messageID := "shared-message"

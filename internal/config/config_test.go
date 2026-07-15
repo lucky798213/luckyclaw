@@ -75,6 +75,34 @@ func TestLoadFileLoadsMultipleProvidersAgentsAndBindings(t *testing.T) {
 	if len(cfg.Bindings) != 2 || cfg.Bindings[1].ChatID != "coder-chat" {
 		t.Fatalf("bindings = %+v", cfg.Bindings)
 	}
+	wantTaskQueue := TaskQueueConfig{
+		MaxConcurrent:             10,
+		TaskTimeoutSeconds:        30,
+		MaxPendingPerConversation: 100,
+	}
+	if cfg.TaskQueue != wantTaskQueue {
+		t.Fatalf("task queue = %+v, want %+v", cfg.TaskQueue, wantTaskQueue)
+	}
+}
+
+func TestLoadFileLoadsTaskQueueConfig(t *testing.T) {
+	content := strings.Replace(validConfigYAML, "default_agent: lucky", `default_agent: lucky
+task_queue:
+  max_concurrent: 3
+  task_timeout_seconds: 45
+  max_pending_per_conversation: 20`, 1)
+	cfg, err := LoadFile(writeConfig(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TaskQueueConfig{
+		MaxConcurrent:             3,
+		TaskTimeoutSeconds:        45,
+		MaxPendingPerConversation: 20,
+	}
+	if cfg.TaskQueue != want {
+		t.Fatalf("task queue = %+v, want %+v", cfg.TaskQueue, want)
+	}
 }
 
 func TestLoadFileLoadsThreadBinding(t *testing.T) {
@@ -179,6 +207,27 @@ func TestLoadFileStrictValidation(t *testing.T) {
 			name:    "Agent 模型列表为空",
 			content: strings.Replace(validConfigYAML, "    models:\n      - deepseek/deepseek-reasoner\ndefault_agent", "    models: []\ndefault_agent", 1),
 			want:    "models cannot be empty",
+		},
+		{
+			name: "任务队列并发数为负数",
+			content: strings.Replace(validConfigYAML, "default_agent: lucky", `default_agent: lucky
+task_queue:
+  max_concurrent: -1`, 1),
+			want: "task_queue.max_concurrent",
+		},
+		{
+			name: "任务队列超时为负数",
+			content: strings.Replace(validConfigYAML, "default_agent: lucky", `default_agent: lucky
+task_queue:
+  task_timeout_seconds: -1`, 1),
+			want: "task_queue.task_timeout_seconds",
+		},
+		{
+			name: "任务队列积压上限为负数",
+			content: strings.Replace(validConfigYAML, "default_agent: lucky", `default_agent: lucky
+task_queue:
+  max_pending_per_conversation: -1`, 1),
+			want: "task_queue.max_pending_per_conversation",
 		},
 	}
 	for _, test := range tests {

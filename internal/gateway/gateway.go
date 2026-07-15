@@ -3,6 +3,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -10,9 +11,8 @@ import (
 	"lukcyclaw/internal/agent"
 	"lukcyclaw/internal/bus"
 	"lukcyclaw/internal/config"
+	"lukcyclaw/internal/taskqueue"
 )
-
-const defaultMessageTimeout = 30 * time.Second
 
 // Gateway 是平台渠道和多个 Agent 之间的统一消息入口。
 type Gateway struct {
@@ -22,11 +22,21 @@ type Gateway struct {
 	chatBindings    map[bus.ConversationAddress]string
 	accountBindings map[bus.ChannelAccount]string
 	deduper         *messageDeduper
-	messageTimeout  time.Duration
+	taskQueue       *taskqueue.Queue
 }
 
-// New 创建一个支持显式 Agent、聊天绑定、账号绑定和默认 Agent 的网关。
+// New 使用默认任务队列参数创建支持多级 Agent 绑定的网关。
 func New(messageBus *bus.MessageBus, agents *agent.Manager, bindings []config.BindingConfig) (*Gateway, error) {
+	return NewWithTaskQueueConfig(messageBus, agents, bindings, config.TaskQueueConfig{})
+}
+
+// NewWithTaskQueueConfig 使用指定任务队列参数创建支持多级 Agent 绑定的网关。
+func NewWithTaskQueueConfig(
+	messageBus *bus.MessageBus,
+	agents *agent.Manager,
+	bindings []config.BindingConfig,
+	taskQueueConfig config.TaskQueueConfig,
+) (*Gateway, error) {
 	if messageBus == nil {
 		return nil, fmt.Errorf("message bus cannot be nil")
 	}
@@ -77,22 +87,34 @@ func New(messageBus *bus.MessageBus, agents *agent.Manager, bindings []config.Bi
 		}
 		chatBindings[key] = binding.AgentID
 	}
-	return &Gateway{
+	gateway := &Gateway{
 		bus:             messageBus,
 		agents:          agents,
 		threadBindings:  threadBindings,
 		chatBindings:    chatBindings,
 		accountBindings: accountBindings,
 		deduper:         newMessageDeduper(defaultDedupTTL),
-		messageTimeout:  defaultMessageTimeout,
-	}, nil
+	}
+	effectiveTaskQueueConfig := taskQueueConfig.WithDefaults()
+	queue, err := taskqueue.NewQueue(
+		effectiveTaskQueueConfig.MaxConcurrent,
+		time.Duration(effectiveTaskQueueConfig.TaskTimeoutSeconds)*time.Second,
+		effectiveTaskQueueConfig.MaxPendingPerConversation,
+		gateway.processInbound,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create task queue: %w", err)
+	}
+	gateway.taskQueue = queue
+	return gateway, nil
 }
 
-// Run 串行消费入站消息。后续需要并发时，可以在这里增加按会话分组的任务队列。
+// Run 快速消费入站消息，并把 Agent 处理交给按会话分组的任务队列。
 func (g *Gateway) Run(ctx context.Context) {
-	// 创建定时触发器
+	// 创建定时触发器。
 	cleanupTicker := time.NewTicker(dedupCleanupInterval)
 	defer cleanupTicker.Stop()
+	defer g.taskQueue.Stop()
 
 	for {
 		select {
@@ -101,12 +123,14 @@ func (g *Gateway) Run(ctx context.Context) {
 		case <-cleanupTicker.C:
 			g.deduper.cleanup()
 		case msg := <-g.bus.Inbound:
-			g.handleInbound(ctx, msg)
+			g.handleInbound(msg)
 		}
 	}
 }
 
-func (g *Gateway) handleInbound(ctx context.Context, msg bus.InboundMessage) {
+// handleInbound 在 Gateway 前端完成去重并快速提交任务。
+func (g *Gateway) handleInbound(msg bus.InboundMessage) {
+	//去重
 	if g.deduper.isDuplicate(msg) {
 		log.Printf(
 			"忽略重复入站消息: channel=%s account_id=%s chat_id=%s thread_id=%s message_id=%s",
@@ -119,15 +143,40 @@ func (g *Gateway) handleInbound(ctx context.Context, msg bus.InboundMessage) {
 		return
 	}
 
+	if err := g.taskQueue.Submit(msg); err != nil {
+		if errors.Is(err, taskqueue.ErrConversationQueueFull) {
+			g.deduper.forget(msg)
+			log.Printf(
+				"会话任务队列已满，拒绝入站消息: channel=%s account_id=%s chat_id=%s thread_id=%s message_id=%s",
+				msg.Channel,
+				msg.AccountID,
+				msg.ChatID,
+				msg.ThreadID,
+				msg.MessageID,
+			)
+			return
+		}
+		log.Printf(
+			"提交入站消息失败: channel=%s account_id=%s chat_id=%s thread_id=%s message_id=%s error=%v",
+			msg.Channel,
+			msg.AccountID,
+			msg.ChatID,
+			msg.ThreadID,
+			msg.MessageID,
+			err,
+		)
+	}
+}
+
+// processInbound 在会话队列中匹配 Agent、执行任务并生成出站消息。
+func (g *Gateway) processInbound(ctx context.Context, msg bus.InboundMessage) {
 	// 匹配 Agent。
 	target, err := g.matchAgent(msg)
 	var reply string
 	if err != nil {
 		reply = err.Error()
 	} else {
-		turnCtx, cancel := context.WithTimeout(ctx, g.messageTimeout)
-		reply = target.HandleMessage(turnCtx, msg)
-		cancel()
+		reply = target.HandleMessage(ctx, msg)
 	}
 	if reply == "" {
 		return

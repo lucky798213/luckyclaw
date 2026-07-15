@@ -19,6 +19,12 @@ agents:
 
 default_agent: lucky
 
+# 以下字段省略或填写 0 时使用默认值：10、30 秒、每个会话等待 100 条。
+task_queue:
+  max_concurrent: 10
+  task_timeout_seconds: 30
+  max_pending_per_conversation: 100
+
 bindings:
   - channel: terminal
     account_id: local

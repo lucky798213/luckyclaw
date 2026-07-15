@@ -16,12 +16,40 @@ import (
 
 const defaultConfigPath = "config.yaml"
 
+const (
+	defaultTaskQueueMaxConcurrent             = 10
+	defaultTaskQueueTimeoutSeconds            = 30
+	defaultTaskQueueMaxPendingPerConversation = 100
+)
+
 // Config 保存 LuckyClaw 的运行配置。
 type Config struct {
 	Providers    map[string]ProviderConfig `yaml:"providers"`
 	Agents       map[string]AgentConfig    `yaml:"agents"`
 	DefaultAgent string                    `yaml:"default_agent"`
 	Bindings     []BindingConfig           `yaml:"bindings"`
+	TaskQueue    TaskQueueConfig           `yaml:"task_queue,omitempty"`
+}
+
+// TaskQueueConfig 保存 Gateway 任务队列的并发、超时和积压限制。
+type TaskQueueConfig struct {
+	MaxConcurrent             int `yaml:"max_concurrent,omitempty"`
+	TaskTimeoutSeconds        int `yaml:"task_timeout_seconds,omitempty"`
+	MaxPendingPerConversation int `yaml:"max_pending_per_conversation,omitempty"`
+}
+
+// WithDefaults 返回补齐默认值后的任务队列配置，零值表示使用默认值。
+func (c TaskQueueConfig) WithDefaults() TaskQueueConfig {
+	if c.MaxConcurrent == 0 {
+		c.MaxConcurrent = defaultTaskQueueMaxConcurrent
+	}
+	if c.TaskTimeoutSeconds == 0 {
+		c.TaskTimeoutSeconds = defaultTaskQueueTimeoutSeconds
+	}
+	if c.MaxPendingPerConversation == 0 {
+		c.MaxPendingPerConversation = defaultTaskQueueMaxPendingPerConversation
+	}
+	return c
 }
 
 // ProviderConfig 保存一个大模型服务商的连接配置。描述 YAML 长什么样
@@ -73,6 +101,7 @@ func LoadFile(path string) (*Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("decode config file %q: %w", path, err)
 	}
+	cfg.TaskQueue = cfg.TaskQueue.WithDefaults()
 
 	if err := validate(&cfg); err != nil {
 		return nil, fmt.Errorf("validate config file %q: %w", path, err)
@@ -82,6 +111,16 @@ func LoadFile(path string) (*Config, error) {
 }
 
 func validate(cfg *Config) error {
+	if cfg.TaskQueue.MaxConcurrent <= 0 {
+		return fmt.Errorf("task_queue.max_concurrent must be greater than zero")
+	}
+	if cfg.TaskQueue.TaskTimeoutSeconds <= 0 {
+		return fmt.Errorf("task_queue.task_timeout_seconds must be greater than zero")
+	}
+	if cfg.TaskQueue.MaxPendingPerConversation <= 0 {
+		return fmt.Errorf("task_queue.max_pending_per_conversation must be greater than zero")
+	}
+
 	if len(cfg.Providers) == 0 {
 		return fmt.Errorf("config must contain at least one provider")
 	}

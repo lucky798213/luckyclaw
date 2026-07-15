@@ -56,6 +56,18 @@ func (d *messageDeduper) isDuplicate(msg bus.InboundMessage) bool {
 	return false
 }
 
+// forget 撤销一条消息的去重登记，使未能入队的消息后续可以重试。
+func (d *messageDeduper) forget(msg bus.InboundMessage) {
+	if msg.MessageID == "" {
+		return
+	}
+
+	key := messageDedupKey{Address: msg.Address(), MessageID: msg.MessageID}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.entries, key)
+}
+
 // cleanup 删除已经到期的消息记录，避免缓存持续增长。
 func (d *messageDeduper) cleanup() {
 	d.mu.Lock()
