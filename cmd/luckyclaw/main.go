@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"sort"
 	"syscall"
+	"time"
 
 	"github.com/lucky798213/luckyclaw/internal/agent"
 	"github.com/lucky798213/luckyclaw/internal/bus"
@@ -16,6 +17,7 @@ import (
 	"github.com/lucky798213/luckyclaw/internal/gateway"
 	"github.com/lucky798213/luckyclaw/internal/provider"
 	"github.com/lucky798213/luckyclaw/internal/session"
+	"github.com/lucky798213/luckyclaw/internal/tools"
 )
 
 func main() {
@@ -126,13 +128,20 @@ func buildAgents(
 	agents := make(map[string]*agent.Agent, len(configs))
 	for _, id := range ids {
 		agentCfg := configs[id]
+		toolRegistry, err := tools.NewDefaultRegistry()
+		if err != nil {
+			return nil, fmt.Errorf("创建 Agent %q 工具注册表: %w", id, err)
+		}
 		current, err := agent.New(agent.Options{
-			ID:           id,
-			Name:         agentCfg.Name,
-			DefaultModel: agentCfg.DefaultModel,
-			Models:       agentCfg.Models,
-			SoulPath:     agentCfg.SoulPath,
-			SessionStore: sessionStore,
+			ID:                id,
+			Name:              agentCfg.Name,
+			DefaultModel:      agentCfg.DefaultModel,
+			Models:            agentCfg.Models,
+			SoulPath:          agentCfg.SoulPath,
+			SessionStore:      sessionStore,
+			Tools:             toolRegistry,
+			MaxToolIterations: agentCfg.MaxToolIterations,
+			ToolTimeout:       time.Duration(agentCfg.ToolTimeoutSeconds) * time.Second,
 		}, providers)
 		if err != nil {
 			return nil, fmt.Errorf("创建 Agent %q: %w", id, err)

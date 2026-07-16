@@ -77,6 +77,9 @@ func TestLoadFileLoadsMultipleProvidersAgentsAndBindings(t *testing.T) {
 	if got := cfg.Agents["lucky"].Models[1]; got != "openrouter/meta-llama/llama-3.3" {
 		t.Fatalf("nested model ref = %q", got)
 	}
+	if got := cfg.Agents["lucky"]; got.MaxToolIterations != 20 || got.ToolTimeoutSeconds != 30 {
+		t.Fatalf("agent tool defaults = %+v", got)
+	}
 	if len(cfg.Bindings) != 2 || cfg.Bindings[1].ChatID != "coder-chat" {
 		t.Fatalf("bindings = %+v", cfg.Bindings)
 	}
@@ -174,6 +177,20 @@ task_queue:
 	}
 	if cfg.TaskQueue != want {
 		t.Fatalf("task queue = %+v, want %+v", cfg.TaskQueue, want)
+	}
+}
+
+func TestLoadFileLoadsAgentToolConfig(t *testing.T) {
+	content := strings.Replace(validConfigYAML, "    name: LuckyClaw", `    name: LuckyClaw
+    max_tool_iterations: 7
+    tool_timeout_seconds: 12`, 1)
+	cfg, err := LoadFile(writeConfig(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Agents["lucky"]
+	if got.MaxToolIterations != 7 || got.ToolTimeoutSeconds != 12 {
+		t.Fatalf("agent tool config = %+v", got)
 	}
 }
 
@@ -279,6 +296,16 @@ func TestLoadFileStrictValidation(t *testing.T) {
 			name:    "Agent 模型列表为空",
 			content: strings.Replace(validConfigYAML, "    models:\n      - deepseek/deepseek-reasoner\ndefault_agent", "    models: []\ndefault_agent", 1),
 			want:    "models cannot be empty",
+		},
+		{
+			name:    "工具迭代上限为负数",
+			content: strings.Replace(validConfigYAML, "    name: LuckyClaw", "    name: LuckyClaw\n    max_tool_iterations: -1", 1),
+			want:    "max_tool_iterations",
+		},
+		{
+			name:    "工具超时为负数",
+			content: strings.Replace(validConfigYAML, "    name: LuckyClaw", "    name: LuckyClaw\n    tool_timeout_seconds: -1", 1),
+			want:    "tool_timeout_seconds",
 		},
 		{
 			name: "任务队列并发数为负数",

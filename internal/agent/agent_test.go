@@ -11,10 +11,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/lucky798213/luckyclaw/internal/bus"
 	"github.com/lucky798213/luckyclaw/internal/provider"
 	"github.com/lucky798213/luckyclaw/internal/session"
+	toolruntime "github.com/lucky798213/luckyclaw/internal/tools"
 )
 
 type fakeProvider struct {
@@ -77,11 +79,21 @@ func newTestAgent(t *testing.T, providers *provider.Manager, soulPath, defaultMo
 		DefaultModel: defaultModel,
 		Models:       models,
 		SoulPath:     soulPath,
+		Tools:        newDefaultToolRegistry(t),
 	}, providers)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return a
+}
+
+func newDefaultToolRegistry(t *testing.T) toolruntime.Registry {
+	t.Helper()
+	registry, err := toolruntime.NewDefaultRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return registry
 }
 
 func inbound(chatID, text string) bus.InboundMessage {
@@ -90,6 +102,39 @@ func inbound(chatID, text string) bus.InboundMessage {
 		AccountID: "local",
 		ChatID:    chatID,
 		Text:      text,
+	}
+}
+
+func TestNewValidatesToolLoopOptions(t *testing.T) {
+	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
+	writeSoul(t, soulPath, "friendly")
+	providers := newProviderManager(t, "test", []string{"model"}, &fakeProvider{})
+	base := Options{
+		ID:           "lucky",
+		Name:         "LuckyClaw",
+		DefaultModel: "test/model",
+		Models:       []string{"test/model"},
+		SoulPath:     soulPath,
+		Tools:        newDefaultToolRegistry(t),
+	}
+	tests := []struct {
+		name  string
+		apply func(*Options)
+		want  string
+	}{
+		{name: "缺少工具注册表", apply: func(options *Options) { options.Tools = nil }, want: "tool registry"},
+		{name: "迭代数为负", apply: func(options *Options) { options.MaxToolIterations = -1 }, want: "max tool iterations"},
+		{name: "超时为负", apply: func(options *Options) { options.ToolTimeout = -time.Second }, want: "tool timeout"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			options := base
+			test.apply(&options)
+			_, err := New(options, providers)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("New() error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -431,6 +476,7 @@ func TestAgentRestoresHistoryAndSessionModelAfterRestart(t *testing.T) {
 		Models:       []string{"deepseek/chat", "openai/mini"},
 		SoulPath:     soulPath,
 		SessionStore: firstStore,
+		Tools:        newDefaultToolRegistry(t),
 	}, firstProviders)
 	if err != nil {
 		t.Fatal(err)
@@ -461,6 +507,7 @@ func TestAgentRestoresHistoryAndSessionModelAfterRestart(t *testing.T) {
 		Models:       []string{"deepseek/chat", "openai/mini"},
 		SoulPath:     soulPath,
 		SessionStore: secondStore,
+		Tools:        newDefaultToolRegistry(t),
 	}, secondProviders)
 	if err != nil {
 		t.Fatal(err)

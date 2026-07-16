@@ -21,6 +21,8 @@ const (
 	defaultTaskQueueTimeoutSeconds            = 30
 	defaultTaskQueueMaxPendingPerConversation = 100
 	defaultStoragePath                        = "data/luckyclaw.db"
+	defaultMaxToolIterations                  = 20
+	defaultToolTimeoutSeconds                 = 30
 )
 
 // Config 保存 LuckyClaw 的运行配置。
@@ -85,10 +87,23 @@ type ProviderConfig struct {
 
 // AgentConfig 保存一个 Agent 的模型白名单和运行参数。
 type AgentConfig struct {
-	Name         string   `yaml:"name"`
-	SoulPath     string   `yaml:"soul_path"`
-	DefaultModel string   `yaml:"default_model"`
-	Models       []string `yaml:"models"`
+	Name               string   `yaml:"name"`
+	SoulPath           string   `yaml:"soul_path"`
+	DefaultModel       string   `yaml:"default_model"`
+	Models             []string `yaml:"models"`
+	MaxToolIterations  int      `yaml:"max_tool_iterations,omitempty"`
+	ToolTimeoutSeconds int      `yaml:"tool_timeout_seconds,omitempty"`
+}
+
+// WithDefaults 返回补齐工具循环默认值后的 Agent 配置。
+func (c AgentConfig) WithDefaults() AgentConfig {
+	if c.MaxToolIterations == 0 {
+		c.MaxToolIterations = defaultMaxToolIterations
+	}
+	if c.ToolTimeoutSeconds == 0 {
+		c.ToolTimeoutSeconds = defaultToolTimeoutSeconds
+	}
+	return c
 }
 
 // BindingConfig 描述一条渠道消息到 Agent 的绑定规则。
@@ -123,6 +138,9 @@ func LoadFile(path string) (*Config, error) {
 	}
 	cfg.TaskQueue = cfg.TaskQueue.WithDefaults()
 	cfg.Storage = cfg.Storage.WithDefaults()
+	for agentID, agentCfg := range cfg.Agents {
+		cfg.Agents[agentID] = agentCfg.WithDefaults()
+	}
 
 	if err := validate(&cfg); err != nil {
 		return nil, fmt.Errorf("validate config file %q: %w", path, err)
@@ -215,6 +233,12 @@ func validate(cfg *Config) error {
 		}
 		if len(agentCfg.Models) == 0 {
 			return fmt.Errorf("agent %q models cannot be empty", agentID)
+		}
+		if agentCfg.MaxToolIterations <= 0 {
+			return fmt.Errorf("agent %q max_tool_iterations must be greater than zero", agentID)
+		}
+		if agentCfg.ToolTimeoutSeconds <= 0 {
+			return fmt.Errorf("agent %q tool_timeout_seconds must be greater than zero", agentID)
 		}
 		allowed := make(map[string]struct{}, len(agentCfg.Models))
 		for _, raw := range agentCfg.Models {

@@ -16,6 +16,9 @@ agents:
     models:
       - deepseek/deepseek-chat
       - deepseek/deepseek-reasoner
+    # 单次请求最多允许 20 轮工具调用；单个工具最多执行 30 秒。
+    max_tool_iterations: 20
+    tool_timeout_seconds: 30
 
 default_agent: lucky
 

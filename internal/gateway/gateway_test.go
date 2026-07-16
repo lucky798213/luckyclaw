@@ -12,6 +12,7 @@ import (
 	"github.com/lucky798213/luckyclaw/internal/bus"
 	"github.com/lucky798213/luckyclaw/internal/config"
 	"github.com/lucky798213/luckyclaw/internal/provider"
+	toolruntime "github.com/lucky798213/luckyclaw/internal/tools"
 )
 
 type fakeProvider struct {
@@ -67,12 +68,17 @@ func newTestAgentWithProvider(t *testing.T, id string, currentProvider provider.
 	if err := providers.Register(id, currentProvider, []string{"chat"}); err != nil {
 		t.Fatal(err)
 	}
+	toolRegistry, err := toolruntime.NewDefaultRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
 	current, err := agent.New(agent.Options{
 		ID:           id,
 		Name:         id,
 		DefaultModel: id + "/chat",
 		Models:       []string{id + "/chat"},
 		SoulPath:     soulPath,
+		Tools:        toolRegistry,
 	}, providers)
 	if err != nil {
 		t.Fatal(err)

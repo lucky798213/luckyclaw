@@ -31,6 +31,7 @@ func managerTestAgent(t *testing.T, id string) *Agent {
 		DefaultModel: "test/" + id,
 		Models:       []string{"test/" + id},
 		SoulPath:     soulPath,
+		Tools:        newDefaultToolRegistry(t),
 	}, providers)
 	if err != nil {
 		t.Fatal(err)
