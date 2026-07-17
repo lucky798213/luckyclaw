@@ -22,6 +22,7 @@ WORKDIR /app
 COPY --from=build --chown=65532:65532 /out/luckyclaw /app/luckyclaw
 COPY --chown=65532:65532 config.example.yaml /app/config.yaml
 COPY --chown=65532:65532 SOUL.md /app/SOUL.md
+COPY --chown=65532:65532 skills /app/skills
 COPY --from=build --chown=65532:65532 /out/data /app/data
 
 USER 65532:65532

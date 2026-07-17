@@ -24,6 +24,14 @@ agents:
     compaction_threshold_tokens: 80000
     # 优先保留最近 20 条消息；硬窗口不足时会缩减到最近的完整对话轮次。
     compaction_recent_messages: 20
+    # 按名称启用顶层目录中发现的 Skill；完整 SKILL.md 只会按需加载。
+    # skills:
+    #   - code-runner
+    # 只有启用后才向有状态会话暴露 exec/read_file/write_file/list_dir。
+    # sandbox_enabled: true
+    # MCP 服务在顶层定义，Agent 通过名称白名单选择。
+    # mcp_servers:
+    #   - echo
 
 default_agent: lucky
 
@@ -34,6 +42,36 @@ storage:
 # 网页工作台默认只监听本机，启动后访问 http://127.0.0.1:8080。
 web:
   listen: 127.0.0.1:8080
+
+# Skill 目录中的每个子目录都必须包含符合 Agent Skills 规范的 SKILL.md。
+skills:
+  directories:
+    - skills
+
+# Docker 沙箱按 Agent 和 session 隔离；网络默认关闭。
+sandbox:
+  image: luckyclaw-sandbox:latest
+  workspace_root: data/workspaces
+  network_enabled: false
+  exec_timeout_seconds: 30
+  cpus: 1
+  memory_mb: 512
+  pids_limit: 128
+  tmpfs_mb: 64
+  max_output_bytes: 1048576
+  max_file_bytes: 1048576
+
+# MCP 本期只支持 stdio。$变量名会从 LuckyClaw 进程环境中解析，缺失时启动失败。
+# mcp:
+#   request_timeout_seconds: 30
+#   max_result_bytes: 1048576
+#   servers:
+#     echo:
+#       transport: stdio
+#       command: some-mcp-server
+#       args: [--stdio]
+#       env:
+#         API_TOKEN: $MCP_API_TOKEN
 
 # 以下字段省略或填写 0 时使用默认值：10、30 秒、每个会话等待 100 条。
 task_queue:
