@@ -67,12 +67,14 @@ func NewRegistry(input ...Tool) (Registry, error) {
 }
 
 // NewDefaultRegistry 创建包含所有内置安全工具的注册表。
-func NewDefaultRegistry() (Registry, error) {
-	return NewRegistry(
+func NewDefaultRegistry(additional ...Tool) (Registry, error) {
+	builtins := []Tool{
 		newCurrentTimeTool(nil),
 		newCalculatorTool(),
 		newHTTPFetchTool(nil),
-	)
+	}
+	builtins = append(builtins, additional...)
+	return NewRegistry(builtins...)
 }
 
 // Definitions 返回按工具名稳定排序的工具定义副本。

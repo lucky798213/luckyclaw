@@ -13,6 +13,7 @@ import (
 	"github.com/lucky798213/luckyclaw/internal/bus"
 	"github.com/lucky798213/luckyclaw/internal/config"
 	"github.com/lucky798213/luckyclaw/internal/provider"
+	"github.com/lucky798213/luckyclaw/internal/session"
 )
 
 type capturingProvider struct {
@@ -110,6 +111,11 @@ func TestBuildAgentsWiresDefaultTools(t *testing.T) {
 	if err := providers.Register("test", captured, []string{"chat"}); err != nil {
 		t.Fatal(err)
 	}
+	store, err := session.OpenSQLite(filepath.Join(t.TempDir(), "sessions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
 	agents, err := buildAgents(map[string]config.AgentConfig{
 		"lucky": {
 			Name:               "LuckyClaw",
@@ -119,7 +125,7 @@ func TestBuildAgentsWiresDefaultTools(t *testing.T) {
 			MaxToolIterations:  4,
 			ToolTimeoutSeconds: 2,
 		},
-	}, providers, nil)
+	}, providers, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +144,7 @@ func TestBuildAgentsWiresDefaultTools(t *testing.T) {
 	for _, definition := range captured.tools {
 		names = append(names, definition.Function.Name)
 	}
-	if !reflect.DeepEqual(names, []string{"calculator", "current_time", "http_fetch"}) {
+	if !reflect.DeepEqual(names, []string{"calculator", "current_time", "http_fetch", "memory_search"}) {
 		t.Fatalf("tools = %v", names)
 	}
 }

@@ -138,7 +138,15 @@ func buildAgents(
 	agents := make(map[string]*agent.Agent, len(configs))
 	for _, id := range ids {
 		agentCfg := configs[id]
-		toolRegistry, err := tools.NewDefaultRegistry()
+		var statefulTools []tools.Tool
+		if sessionStore != nil {
+			memorySearch, err := tools.NewMemorySearchTool(sessionStore, id)
+			if err != nil {
+				return nil, fmt.Errorf("创建 Agent %q 长期记忆工具: %w", id, err)
+			}
+			statefulTools = append(statefulTools, memorySearch)
+		}
+		toolRegistry, err := tools.NewDefaultRegistry(statefulTools...)
 		if err != nil {
 			return nil, fmt.Errorf("创建 Agent %q 工具注册表: %w", id, err)
 		}

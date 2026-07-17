@@ -340,6 +340,9 @@ func (a *Agent) runConversation(
 	// 初始化本轮工具循环状态。
 	// toolCallCounts 用于识别同名同参数的重复调用；failedRounds 用于连续失败降级。
 	toolDefinitions := a.tools.Definitions()
+	if currentSession == nil {
+		toolDefinitions = withoutToolDefinition(toolDefinitions, tools.MemorySearchToolName)
+	}
 	toolCallCounts := make(map[toolCallSignature]int)
 	failedRounds := 0
 
@@ -406,7 +409,7 @@ func (a *Agent) runConversation(
 				executeErr = fmt.Errorf("repeated tool call blocked after %d attempts", repeatedToolCallLimit)
 			} else {
 				// 每个工具都由 executeToolCall 添加独立超时，单个慢工具不会拖死整个循环。
-				result, executeErr = a.executeToolCall(ctx, call)
+				result, executeErr = a.executeToolCall(ctx, currentSession, call)
 			}
 			if ctx.Err() != nil || errors.Is(executeErr, context.Canceled) {
 				return nil, ctx.Err()
@@ -548,9 +551,12 @@ func makeToolCallSignature(call provider.ToolCall) toolCallSignature {
 	}
 }
 
-func (a *Agent) executeToolCall(ctx context.Context, call provider.ToolCall) (string, error) {
+func (a *Agent) executeToolCall(ctx context.Context, currentSession *session.Session, call provider.ToolCall) (string, error) {
 	if call.Type != "function" {
 		return "", fmt.Errorf("unsupported tool call type %q", call.Type)
+	}
+	if currentSession != nil {
+		ctx = tools.WithSessionScope(ctx, a.id, currentSession.Address())
 	}
 	toolCtx, cancel := context.WithTimeout(ctx, a.toolTimeout)
 	defer cancel()
@@ -575,6 +581,16 @@ func (a *Agent) executeToolCall(ctx context.Context, call provider.ToolCall) (st
 		}
 		return result.content, result.err
 	}
+}
+
+func withoutToolDefinition(definitions []provider.Tool, name string) []provider.Tool {
+	filtered := make([]provider.Tool, 0, len(definitions))
+	for _, definition := range definitions {
+		if definition.Function.Name != name {
+			filtered = append(filtered, definition)
+		}
+	}
+	return filtered
 }
 
 func formatToolError(err error) string {
