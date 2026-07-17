@@ -46,15 +46,20 @@ type memorySearchOutputResult struct {
 }
 
 type sessionScope struct {
-	agentID string
-	address bus.ConversationAddress
+	agentID    string
+	sessionKey string
+	address    bus.ConversationAddress
 }
 
 type sessionScopeKey struct{}
 
 // WithSessionScope 为一次工具执行附加不可由模型伪造的当前会话范围。
-func WithSessionScope(ctx context.Context, agentID string, address bus.ConversationAddress) context.Context {
-	return context.WithValue(ctx, sessionScopeKey{}, sessionScope{agentID: agentID, address: address})
+func WithSessionScope(ctx context.Context, agentID string, address bus.ConversationAddress, sessionKey ...string) context.Context {
+	scope := sessionScope{agentID: agentID, address: address}
+	if len(sessionKey) > 0 {
+		scope.sessionKey = sessionKey[0]
+	}
+	return context.WithValue(ctx, sessionScopeKey{}, scope)
 }
 
 // NewMemorySearchTool 创建绑定指定 Agent 的 SQLite 长期记忆工具。

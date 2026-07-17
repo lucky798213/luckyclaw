@@ -560,7 +560,7 @@ func (a *Agent) executeToolCall(ctx context.Context, currentSession *session.Ses
 		return "", fmt.Errorf("unsupported tool call type %q", call.Type)
 	}
 	if currentSession != nil {
-		ctx = tools.WithSessionScope(ctx, a.id, currentSession.Address())
+		ctx = tools.WithSessionScope(ctx, a.id, currentSession.Address(), currentSession.Key())
 	}
 	toolCtx, cancel := context.WithTimeout(ctx, a.toolTimeout)
 	defer cancel()
