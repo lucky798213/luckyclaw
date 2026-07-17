@@ -6,9 +6,24 @@ import (
 	"encoding/json"
 )
 
+// StreamChunk 表示模型流中的一个增量片段。
+// Delta 只在文本增量片段中有值；Done 为 true 时 Message 保存完整的 assistant 消息。
+type StreamChunk struct {
+	Delta   string
+	Message *Message
+	Done    bool
+}
+
+// Stream 提供按顺序读取模型流的能力。
+type Stream interface {
+	Next() (StreamChunk, error)
+	Close() error
+}
+
 // Provider 定义大模型服务提供方需要实现的能力。
 type Provider interface {
 	Chat(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64) (*Message, error)
+	ChatStream(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64) (Stream, error)
 }
 
 // 表示一条消息

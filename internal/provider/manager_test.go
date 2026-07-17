@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -12,6 +13,10 @@ type managerFakeProvider struct {
 
 func (p *managerFakeProvider) Chat(_ context.Context, _ []Message, _ []Tool, _ string, _ int, _ float64) (*Message, error) {
 	return &Message{Role: "assistant", Content: p.name}, nil
+}
+
+func (p *managerFakeProvider) ChatStream(_ context.Context, _ []Message, _ []Tool, _ string, _ int, _ float64) (Stream, error) {
+	return nil, fmt.Errorf("stream is not used in manager tests")
 }
 
 func TestParseModelRefKeepsNestedModelID(t *testing.T) {

@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -130,5 +131,64 @@ func TestOpenAIProviderChat(t *testing.T) {
 	}
 	if message.Role != "assistant" || message.Content != "hello" {
 		t.Fatalf("unexpected message: %+v", message)
+	}
+}
+
+func TestOpenAIProviderChatStreamAssemblesContentAndToolCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			return
+		}
+		if body["stream"] != true {
+			t.Errorf("stream = %#v, want true", body["stream"])
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"cal\",\"arguments\":\"{\\\"expression\\\":\\\"6*\"}}]}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"好\",\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"culator\",\"arguments\":\"8\\\"}\"}}]}}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	current, err := NewOpenAI("test-key", server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream, err := current.ChatStream(context.Background(), []Message{{Role: "user", Content: "计算"}}, nil, "test-model", 100, 0.7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+
+	var deltas string
+	var final *Message
+	for {
+		chunk, nextErr := stream.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+		deltas += chunk.Delta
+		if chunk.Done {
+			final = chunk.Message
+			break
+		}
+	}
+	if deltas != "你好" {
+		t.Fatalf("deltas = %q, want 你好", deltas)
+	}
+	if final == nil || final.Content != "你好" || len(final.ToolCalls) != 1 {
+		t.Fatalf("final = %+v", final)
+	}
+	call := final.ToolCalls[0]
+	if call.ID != "call-1" || call.Function.Name != "calculator" || call.Function.Arguments != `{"expression":"6*8"}` {
+		t.Fatalf("tool call = %+v", call)
+	}
+	if len(final.RawAssistant) == 0 {
+		t.Fatal("final RawAssistant is empty")
 	}
 }
