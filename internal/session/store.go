@@ -32,6 +32,16 @@ type Summary struct {
 	UpdatedAt time.Time
 }
 
+// MemorySearchResult 是一条限定会话地址的长期记忆检索结果。
+type MemorySearchResult struct {
+	SessionKey string
+	Sequence   int
+	Role       string
+	Content    string
+	Snippet    string
+	CreatedAt  time.Time
+}
+
 // Store 定义会话管理器需要的最小持久化能力。
 type Store interface {
 	CreateAndActivate(ctx context.Context, agentID string, record Record) error
@@ -40,5 +50,6 @@ type Store interface {
 	UpdateMessages(ctx context.Context, agentID, key string, messages []provider.Message) error
 	UpdateModelRef(ctx context.Context, agentID, key, modelRef string) error
 	UpdateCompaction(ctx context.Context, agentID, key string, expectedUntil int, summary string, compactedUntil int) error
+	SearchMemory(ctx context.Context, agentID string, address bus.ConversationAddress, query string, limit int) ([]MemorySearchResult, error)
 	Close() error
 }

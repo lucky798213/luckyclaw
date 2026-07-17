@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 
@@ -101,6 +103,31 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			FOREIGN KEY (agent_id, session_key)
 				REFERENCES sessions(agent_id, session_key) ON DELETE CASCADE
 		)`,
+		`CREATE TABLE IF NOT EXISTS memory_entries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			agent_id TEXT NOT NULL,
+			session_key TEXT NOT NULL,
+			seq INTEGER NOT NULL,
+			role TEXT NOT NULL,
+			content TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			UNIQUE (agent_id, session_key, seq),
+			FOREIGN KEY (agent_id, session_key)
+				REFERENCES sessions(agent_id, session_key) ON DELETE CASCADE
+		)`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+			content,
+			content='memory_entries',
+			content_rowid='id',
+			tokenize='trigram'
+		)`,
+		`CREATE TRIGGER IF NOT EXISTS memory_entries_ai AFTER INSERT ON memory_entries BEGIN
+			INSERT INTO memory_fts(rowid, content) VALUES (new.id, new.content);
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS memory_entries_ad AFTER DELETE ON memory_entries BEGIN
+			INSERT INTO memory_fts(memory_fts, rowid, content)
+			VALUES ('delete', old.id, old.content);
+		END`,
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -117,6 +144,9 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := ensureSessionColumn(ctx, tx, "compacted_until", `ALTER TABLE sessions ADD COLUMN compacted_until INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := backfillMemoryEntries(ctx, tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -157,6 +187,9 @@ func (s *SQLiteStore) CreateAndActivate(ctx context.Context, agentID string, rec
 		now,
 	); err != nil {
 		return fmt.Errorf("insert session %q: %w", record.Key, err)
+	}
+	if err := insertMemoryEntries(ctx, tx, agentID, record.Key, 0, record.Messages, now, false); err != nil {
+		return fmt.Errorf("index session %q: %w", record.Key, err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -259,21 +292,51 @@ func (s *SQLiteStore) ListByAgent(ctx context.Context, agentID, channel string) 
 	return summaries, nil
 }
 
-// UpdateMessages 覆盖会话的工作消息集。
+// UpdateMessages 仅允许追加完整历史，并在同一事务中写入长期记忆索引。
 func (s *SQLiteStore) UpdateMessages(ctx context.Context, agentID, key string, messages []provider.Message) error {
 	payload, err := marshalMessages(messages)
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin update session messages %q: %w", key, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var existingJSON string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT messages_json FROM sessions WHERE agent_id = ? AND session_key = ?`, agentID, key).Scan(&existingJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %s", errSessionNotFound, key)
+		}
+		return fmt.Errorf("load session messages %q: %w", key, err)
+	}
+	var existing []provider.Message
+	if err := json.Unmarshal([]byte(existingJSON), &existing); err != nil {
+		return fmt.Errorf("decode existing session messages %q: %w", key, err)
+	}
+	if len(messages) < len(existing) || !reflect.DeepEqual(existing, messages[:len(existing)]) {
+		return fmt.Errorf("update session messages %q must append to the complete history", key)
+	}
+	now := time.Now().UnixMilli()
+	result, err := tx.ExecContext(ctx, `
 		UPDATE sessions
 		SET messages_json = ?, updated_at = ?
 		WHERE agent_id = ? AND session_key = ?`,
-		payload, time.Now().UnixMilli(), agentID, key)
+		payload, now, agentID, key)
 	if err != nil {
 		return fmt.Errorf("update session messages %q: %w", key, err)
 	}
-	return requireUpdated(result, key)
+	if err := requireUpdated(result, key); err != nil {
+		return err
+	}
+	if err := insertMemoryEntries(ctx, tx, agentID, key, len(existing), messages[len(existing):], now, false); err != nil {
+		return fmt.Errorf("index session messages %q: %w", key, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit session messages %q: %w", key, err)
+	}
+	return nil
 }
 
 // UpdateModelRef 更新会话级模型选择。
@@ -322,6 +385,133 @@ func (s *SQLiteStore) UpdateCompaction(
 		return fmt.Errorf("check session compaction conflict %q: %w", key, err)
 	}
 	return ErrCompactionConflict
+}
+
+// SearchMemory 在同一 Agent 和会话地址下跨 session 检索原始历史。
+func (s *SQLiteStore) SearchMemory(
+	ctx context.Context,
+	agentID string,
+	address bus.ConversationAddress,
+	query string,
+	limit int,
+) ([]MemorySearchResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, fmt.Errorf("memory search query cannot be empty")
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	if limit > 20 {
+		limit = 20
+	}
+	terms := strings.Fields(query)
+	if len(terms) == 0 {
+		return nil, fmt.Errorf("memory search query cannot be empty")
+	}
+	for _, term := range terms {
+		if utf8.RuneCountInString(term) < 3 {
+			return s.searchMemoryLike(ctx, agentID, address, terms, limit)
+		}
+	}
+
+	quoted := make([]string, 0, len(terms))
+	for _, term := range terms {
+		quoted = append(quoted, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT e.session_key, e.seq, e.role, e.content,
+			snippet(memory_fts, 0, '[', ']', '…', 32), e.created_at
+		FROM memory_fts
+		JOIN memory_entries AS e ON e.id = memory_fts.rowid
+		JOIN sessions AS ss
+			ON ss.agent_id = e.agent_id AND ss.session_key = e.session_key
+		WHERE memory_fts MATCH ?
+			AND e.agent_id = ?
+			AND ss.channel = ? AND ss.account_id = ?
+			AND ss.chat_id = ? AND ss.thread_id = ?
+		ORDER BY bm25(memory_fts), e.created_at DESC
+		LIMIT ?`,
+		strings.Join(quoted, " AND "),
+		agentID,
+		address.Channel,
+		address.AccountID,
+		address.ChatID,
+		address.ThreadID,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("search memory fts: %w", err)
+	}
+	defer rows.Close()
+	return scanMemoryResults(rows)
+}
+
+func (s *SQLiteStore) searchMemoryLike(
+	ctx context.Context,
+	agentID string,
+	address bus.ConversationAddress,
+	terms []string,
+	limit int,
+) ([]MemorySearchResult, error) {
+	var statement strings.Builder
+	statement.WriteString(`
+		SELECT e.session_key, e.seq, e.role, e.content, e.content, e.created_at
+		FROM memory_entries AS e
+		JOIN sessions AS ss
+			ON ss.agent_id = e.agent_id AND ss.session_key = e.session_key
+		WHERE e.agent_id = ?
+			AND ss.channel = ? AND ss.account_id = ?
+			AND ss.chat_id = ? AND ss.thread_id = ?`)
+	arguments := []any{
+		agentID,
+		address.Channel,
+		address.AccountID,
+		address.ChatID,
+		address.ThreadID,
+	}
+	for _, term := range terms {
+		statement.WriteString(` AND e.content LIKE ? ESCAPE '\'`)
+		arguments = append(arguments, "%"+escapeLikeTerm(term)+"%")
+	}
+	statement.WriteString(` ORDER BY e.created_at DESC LIMIT ?`)
+	arguments = append(arguments, limit)
+	rows, err := s.db.QueryContext(ctx, statement.String(), arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("search memory fallback: %w", err)
+	}
+	defer rows.Close()
+	return scanMemoryResults(rows)
+}
+
+func scanMemoryResults(rows *sql.Rows) ([]MemorySearchResult, error) {
+	results := make([]MemorySearchResult, 0)
+	for rows.Next() {
+		var result MemorySearchResult
+		var createdAt int64
+		if err := rows.Scan(
+			&result.SessionKey,
+			&result.Sequence,
+			&result.Role,
+			&result.Content,
+			&result.Snippet,
+			&createdAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan memory result: %w", err)
+		}
+		result.CreatedAt = time.UnixMilli(createdAt)
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate memory results: %w", err)
+	}
+	return results, nil
+}
+
+func escapeLikeTerm(term string) string {
+	term = strings.ReplaceAll(term, `\`, `\\`)
+	term = strings.ReplaceAll(term, `%`, `\%`)
+	return strings.ReplaceAll(term, `_`, `\_`)
 }
 
 type rowScanner interface {
@@ -393,6 +583,100 @@ func ensureSessionColumn(ctx context.Context, tx *sql.Tx, column, alterStatement
 		return fmt.Errorf("add sessions column %q: %w", column, err)
 	}
 	return nil
+}
+
+type memoryBackfillSession struct {
+	agentID   string
+	key       string
+	messages  []provider.Message
+	createdAt int64
+}
+
+func backfillMemoryEntries(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT agent_id, session_key, messages_json, created_at FROM sessions`)
+	if err != nil {
+		return fmt.Errorf("load sessions for memory backfill: %w", err)
+	}
+	var sessions []memoryBackfillSession
+	for rows.Next() {
+		var item memoryBackfillSession
+		var messagesJSON string
+		if err := rows.Scan(&item.agentID, &item.key, &messagesJSON, &item.createdAt); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan session memory backfill: %w", err)
+		}
+		if err := json.Unmarshal([]byte(messagesJSON), &item.messages); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("decode session %q for memory backfill: %w", item.key, err)
+		}
+		sessions = append(sessions, item)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close session memory backfill: %w", err)
+	}
+	for _, item := range sessions {
+		if err := insertMemoryEntries(ctx, tx, item.agentID, item.key, 0, item.messages, item.createdAt, true); err != nil {
+			return fmt.Errorf("backfill session %q memory: %w", item.key, err)
+		}
+	}
+	return nil
+}
+
+func insertMemoryEntries(
+	ctx context.Context,
+	tx *sql.Tx,
+	agentID string,
+	key string,
+	startSequence int,
+	messages []provider.Message,
+	createdAt int64,
+	ignoreExisting bool,
+) error {
+	insert := `INSERT INTO memory_entries (
+		agent_id, session_key, seq, role, content, created_at
+	) VALUES (?, ?, ?, ?, ?, ?)`
+	if ignoreExisting {
+		insert = `INSERT OR IGNORE INTO memory_entries (
+			agent_id, session_key, seq, role, content, created_at
+		) VALUES (?, ?, ?, ?, ?, ?)`
+	}
+	for offset, message := range messages {
+		content, searchable := searchableMemoryContent(message)
+		if !searchable {
+			continue
+		}
+		sequence := startSequence + offset
+		if _, err := tx.ExecContext(ctx, insert,
+			agentID, key, sequence, message.Role, content, createdAt+int64(offset)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func searchableMemoryContent(message provider.Message) (string, bool) {
+	if message.Role != "user" && message.Role != "assistant" && message.Role != "tool" {
+		return "", false
+	}
+	if message.Role == "tool" && message.Name == "memory_search" {
+		return "", false
+	}
+	var content strings.Builder
+	content.WriteString(strings.TrimSpace(message.Content))
+	for _, call := range message.ToolCalls {
+		if call.Function.Name == "memory_search" {
+			continue
+		}
+		if content.Len() > 0 {
+			content.WriteString("\n")
+		}
+		content.WriteString(call.Function.Name)
+		content.WriteString(" ")
+		content.WriteString(call.Function.Arguments)
+	}
+	text := strings.TrimSpace(content.String())
+	return text, text != ""
 }
 
 func marshalMessages(messages []provider.Message) (string, error) {
