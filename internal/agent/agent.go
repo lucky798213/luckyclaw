@@ -21,7 +21,10 @@ import (
 	"github.com/lucky798213/luckyclaw/internal/tools"
 )
 
-const handleMessageErrorReply = "抱歉，消息处理失败，请稍后重试。"
+const (
+	handleMessageErrorReply = "抱歉，消息处理失败，请稍后重试。"
+	contextWindowErrorReply = "当前会话上下文过长，无法在模型窗口内安全处理。请缩短单条消息或稍后重试自动压缩。"
+)
 
 const (
 	defaultMaxToolIterations         = 20
@@ -81,6 +84,20 @@ type userVisibleError struct {
 }
 
 func (e *userVisibleError) Error() string { return e.message }
+
+type contextWindowError struct {
+	usage tokenUsage
+	cause error
+}
+
+func (e *contextWindowError) Error() string {
+	if e.cause != nil {
+		return fmt.Sprintf("context window exceeded: %v", e.cause)
+	}
+	return fmt.Sprintf("context window exceeded: total=%d", e.usage.TotalTokens)
+}
+
+func (e *contextWindowError) Unwrap() error { return e.cause }
 
 // New 创建一个支持多个模型的 Agent。
 func New(options Options, providers *provider.Manager) (*Agent, error) {
@@ -219,6 +236,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		if errors.As(err, &visible) {
 			return visible.Error()
 		}
+		var windowErr *contextWindowError
+		if errors.As(err, &windowErr) {
+			return contextWindowErrorReply
+		}
 		log.Printf("Agent %s 处理消息失败: %v", a.id, err)
 		return handleMessageErrorReply
 	}
@@ -297,14 +318,12 @@ func (a *Agent) handleMessageWithEvents(ctx context.Context, msg bus.InboundMess
 		return nil, &userVisibleError{message: fmt.Sprintf("模型 %s 当前不可用: %v", selectedModel, err)}
 	}
 
-	// 4. 组装发给模型的完整上下文：Soul 系统提示词、历史消息、本轮用户消息。
-	// 此时用户消息只加入调用上下文，还没有持久化；首次模型调用失败时不会污染会话历史。
+	// 4. 组装发给模型的预算内上下文；首次模型调用失败时不会污染会话历史。
 	userMessage := provider.Message{Role: "user", Content: msg.Text}
-	history := currentSession.Messages()
-	messages := make([]provider.Message, 0, len(history)+2)
-	messages = append(messages, provider.Message{Role: "system", Content: soul})
-	messages = append(messages, history...)
-	messages = append(messages, userMessage)
+	messages, err := a.prepareStatefulContext(ctx, resolved, currentSession, soul, userMessage)
+	if err != nil {
+		return nil, err
+	}
 	return a.runConversation(ctx, resolved, currentSession, messages, []provider.Message{userMessage}, events, a.maxTokens, a.temperature)
 }
 
@@ -455,6 +474,9 @@ func (a *Agent) callModel(
 	temperature float64,
 	events chan<- Event,
 ) (*provider.Message, error) {
+	if !a.tokenBudget.fits(messages, toolDefinitions, maxTokens) {
+		return nil, &contextWindowError{usage: a.tokenBudget.usage(messages, toolDefinitions, maxTokens)}
+	}
 	if events == nil {
 		return resolved.Provider.Chat(ctx, messages, toolDefinitions, resolved.ModelID, maxTokens, temperature)
 	}
@@ -607,6 +629,10 @@ func (a *Agent) synthesizeFinal(
 	)
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
 		return nil, ctx.Err()
+	}
+	var windowErr *contextWindowError
+	if errors.As(err, &windowErr) {
+		return nil, windowErr
 	}
 	assistant := provider.Message{Role: "assistant"}
 	if err == nil && response != nil && len(response.ToolCalls) == 0 && strings.TrimSpace(response.Content) != "" {

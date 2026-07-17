@@ -59,8 +59,11 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		if err != nil {
 			message := handleMessageErrorReply
 			var visible *userVisibleError
+			var windowErr *contextWindowError
 			if errors.As(err, &visible) {
 				message = visible.Error()
+			} else if errors.As(err, &windowErr) {
+				message = contextWindowErrorReply
 			} else {
 				log.Printf("Agent %s 流式处理消息失败: %v", a.id, err)
 			}
