@@ -17,6 +17,7 @@ import (
 	"github.com/lucky798213/luckyclaw/internal/gateway"
 	"github.com/lucky798213/luckyclaw/internal/mcp"
 	"github.com/lucky798213/luckyclaw/internal/provider"
+	sandboxruntime "github.com/lucky798213/luckyclaw/internal/sandbox"
 	"github.com/lucky798213/luckyclaw/internal/session"
 	"github.com/lucky798213/luckyclaw/internal/skills"
 	"github.com/lucky798213/luckyclaw/internal/tools"
@@ -59,7 +60,30 @@ func main() {
 			log.Printf("关闭 MCP 服务失败: %v", err)
 		}
 	}()
-	agents, err := buildAgents(cfg.Agents, providerManager, sessionStore, skillCatalog, mcpManager)
+	var sandboxPool sandboxruntime.ExecutorPool
+	if sandboxRequired(cfg.Agents) {
+		sandboxPool, err = sandboxruntime.NewDockerPool(sandboxruntime.DockerPolicy{
+			Image:          cfg.Sandbox.Image,
+			NetworkEnabled: cfg.Sandbox.NetworkEnabled,
+			CPUs:           cfg.Sandbox.CPUs,
+			MemoryMB:       cfg.Sandbox.MemoryMB,
+			PIDsLimit:      cfg.Sandbox.PIDsLimit,
+			TmpfsMB:        cfg.Sandbox.TmpfsMB,
+			MaxOutputBytes: cfg.Sandbox.MaxOutputBytes,
+			MaxFileBytes:   cfg.Sandbox.MaxFileBytes,
+		}, cfg.Sandbox.WorkspaceRoot)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := sandboxPool.Close(closeCtx); err != nil {
+				log.Printf("关闭 Docker 沙箱失败: %v", err)
+			}
+		}()
+	}
+	agents, err := buildAgents(cfg.Agents, providerManager, sessionStore, skillCatalog, mcpManager, sandboxPool, time.Duration(cfg.Sandbox.ExecTimeoutSeconds)*time.Second)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -147,6 +171,8 @@ func buildAgents(
 	sessionStore session.Store,
 	skillCatalog *skills.Catalog,
 	mcpManager *mcp.Manager,
+	sandboxPool sandboxruntime.ExecutorPool,
+	sandboxTimeout time.Duration,
 ) (map[string]*agent.Agent, error) {
 	ids := make([]string, 0, len(configs))
 	for id := range configs {
@@ -174,6 +200,13 @@ func buildAgents(
 			return nil, fmt.Errorf("创建 Agent %q MCP 工具: %w", id, err)
 		}
 		additionalTools = append(additionalTools, mcpTools...)
+		if agentCfg.SandboxEnabled {
+			sandboxTools, err := tools.NewSandboxTools(sandboxPool, selectedSkills, sandboxTimeout)
+			if err != nil {
+				return nil, fmt.Errorf("创建 Agent %q Docker 工具: %w", id, err)
+			}
+			additionalTools = append(additionalTools, sandboxTools...)
+		}
 		if sessionStore != nil {
 			memorySearch, err := tools.NewMemorySearchTool(sessionStore, id)
 			if err != nil {
@@ -221,4 +254,13 @@ func referencedMCPServers(configs map[string]config.AgentConfig) []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+func sandboxRequired(configs map[string]config.AgentConfig) bool {
+	for _, agentCfg := range configs {
+		if agentCfg.SandboxEnabled {
+			return true
+		}
+	}
+	return false
 }

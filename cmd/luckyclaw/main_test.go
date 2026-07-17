@@ -127,7 +127,7 @@ func TestBuildAgentsWiresDefaultTools(t *testing.T) {
 			MaxToolIterations:  4,
 			ToolTimeoutSeconds: 2,
 		},
-	}, providers, store, mustEmptySkillCatalog(t), mustEmptyMCPManager(t))
+	}, providers, store, mustEmptySkillCatalog(t), mustEmptyMCPManager(t), nil, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}

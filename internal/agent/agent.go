@@ -345,7 +345,13 @@ func (a *Agent) runConversation(
 	// toolCallCounts 用于识别同名同参数的重复调用；failedRounds 用于连续失败降级。
 	toolDefinitions := a.tools.Definitions()
 	if currentSession == nil {
-		toolDefinitions = withoutToolDefinition(toolDefinitions, tools.MemorySearchToolName)
+		filtered := make([]provider.Tool, 0, len(toolDefinitions))
+		for _, definition := range toolDefinitions {
+			if !tools.IsStatefulToolName(definition.Function.Name) {
+				filtered = append(filtered, definition)
+			}
+		}
+		toolDefinitions = filtered
 	}
 	toolCallCounts := make(map[toolCallSignature]int)
 	failedRounds := 0
@@ -585,16 +591,6 @@ func (a *Agent) executeToolCall(ctx context.Context, currentSession *session.Ses
 		}
 		return result.content, result.err
 	}
-}
-
-func withoutToolDefinition(definitions []provider.Tool, name string) []provider.Tool {
-	filtered := make([]provider.Tool, 0, len(definitions))
-	for _, definition := range definitions {
-		if definition.Function.Name != name {
-			filtered = append(filtered, definition)
-		}
-	}
-	return filtered
 }
 
 func formatToolError(err error) string {
