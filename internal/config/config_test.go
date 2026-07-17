@@ -77,7 +77,8 @@ func TestLoadFileLoadsMultipleProvidersAgentsAndBindings(t *testing.T) {
 	if got := cfg.Agents["lucky"].Models[1]; got != "openrouter/meta-llama/llama-3.3" {
 		t.Fatalf("nested model ref = %q", got)
 	}
-	if got := cfg.Agents["lucky"]; got.MaxToolIterations != 20 || got.ToolTimeoutSeconds != 30 {
+	if got := cfg.Agents["lucky"]; got.MaxToolIterations != 20 || got.ToolTimeoutSeconds != 30 ||
+		got.ContextWindowTokens != 128000 || got.CompactionThresholdTokens != 80000 || got.CompactionRecentMessages != 20 {
 		t.Fatalf("agent tool defaults = %+v", got)
 	}
 	if len(cfg.Bindings) != 2 || cfg.Bindings[1].ChatID != "coder-chat" {
@@ -199,13 +200,17 @@ task_queue:
 func TestLoadFileLoadsAgentToolConfig(t *testing.T) {
 	content := strings.Replace(validConfigYAML, "    name: LuckyClaw", `    name: LuckyClaw
     max_tool_iterations: 7
-    tool_timeout_seconds: 12`, 1)
+    tool_timeout_seconds: 12
+    context_window_tokens: 64000
+    compaction_threshold_tokens: 40000
+    compaction_recent_messages: 12`, 1)
 	cfg, err := LoadFile(writeConfig(t, content))
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := cfg.Agents["lucky"]
-	if got.MaxToolIterations != 7 || got.ToolTimeoutSeconds != 12 {
+	if got.MaxToolIterations != 7 || got.ToolTimeoutSeconds != 12 ||
+		got.ContextWindowTokens != 64000 || got.CompactionThresholdTokens != 40000 || got.CompactionRecentMessages != 12 {
 		t.Fatalf("agent tool config = %+v", got)
 	}
 }
@@ -322,6 +327,21 @@ func TestLoadFileStrictValidation(t *testing.T) {
 			name:    "工具超时为负数",
 			content: strings.Replace(validConfigYAML, "    name: LuckyClaw", "    name: LuckyClaw\n    tool_timeout_seconds: -1", 1),
 			want:    "tool_timeout_seconds",
+		},
+		{
+			name:    "上下文窗口为负数",
+			content: strings.Replace(validConfigYAML, "    name: LuckyClaw", "    name: LuckyClaw\n    context_window_tokens: -1", 1),
+			want:    "context_window_tokens",
+		},
+		{
+			name:    "压缩阈值不小于窗口",
+			content: strings.Replace(validConfigYAML, "    name: LuckyClaw", "    name: LuckyClaw\n    context_window_tokens: 100\n    compaction_threshold_tokens: 100", 1),
+			want:    "compaction_threshold_tokens",
+		},
+		{
+			name:    "近期消息数量为负数",
+			content: strings.Replace(validConfigYAML, "    name: LuckyClaw", "    name: LuckyClaw\n    compaction_recent_messages: -1", 1),
+			want:    "compaction_recent_messages",
 		},
 		{
 			name: "任务队列并发数为负数",

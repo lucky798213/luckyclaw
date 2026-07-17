@@ -24,10 +24,13 @@ import (
 const handleMessageErrorReply = "抱歉，消息处理失败，请稍后重试。"
 
 const (
-	defaultMaxToolIterations = 20
-	defaultToolTimeout       = 30 * time.Second
-	repeatedToolCallLimit    = 3
-	failedToolRoundLimit     = 3
+	defaultMaxToolIterations         = 20
+	defaultToolTimeout               = 30 * time.Second
+	defaultContextWindowTokens       = 128000
+	defaultCompactionThresholdTokens = 80000
+	defaultCompactionRecentMessages  = 20
+	repeatedToolCallLimit            = 3
+	failedToolRoundLimit             = 3
 )
 
 // Options 保存创建 Agent 所需的模型和身份配置。
@@ -45,6 +48,12 @@ type Options struct {
 	MaxToolIterations int
 	// ToolTimeout 限制单次工具执行时间。
 	ToolTimeout time.Duration
+	// ContextWindowTokens 是模型上下文窗口的总 token 数。
+	ContextWindowTokens int
+	// CompactionThresholdTokens 是触发历史压缩的预算阈值。
+	CompactionThresholdTokens int
+	// CompactionRecentMessages 是压缩时优先保留的近期消息数量。
+	CompactionRecentMessages int
 }
 
 // Agent 表示一个可以在模型白名单中选择模型的大模型智能体。
@@ -63,6 +72,8 @@ type Agent struct {
 	tools             tools.Registry
 	maxToolIterations int
 	toolTimeout       time.Duration
+	tokenBudget       tokenBudget
+	recentMessages    int
 }
 
 type userVisibleError struct {
@@ -141,6 +152,28 @@ func New(options Options, providers *provider.Manager) (*Agent, error) {
 	if toolTimeout < 0 {
 		return nil, fmt.Errorf("tool timeout cannot be negative")
 	}
+	contextWindowTokens := options.ContextWindowTokens
+	if contextWindowTokens == 0 {
+		contextWindowTokens = defaultContextWindowTokens
+	}
+	compactionThresholdTokens := options.CompactionThresholdTokens
+	if compactionThresholdTokens == 0 {
+		compactionThresholdTokens = defaultCompactionThresholdTokens
+	}
+	recentMessages := options.CompactionRecentMessages
+	if recentMessages == 0 {
+		recentMessages = defaultCompactionRecentMessages
+	}
+	budget, err := newTokenBudget(contextWindowTokens, compactionThresholdTokens)
+	if err != nil {
+		return nil, err
+	}
+	if recentMessages < 0 {
+		return nil, fmt.Errorf("compaction recent messages cannot be negative")
+	}
+	if budget.hardInputLimit(maxTokens) <= 0 {
+		return nil, fmt.Errorf("context window tokens must exceed max output tokens and safety reserve")
+	}
 
 	return &Agent{
 		id:                options.ID,
@@ -156,6 +189,8 @@ func New(options Options, providers *provider.Manager) (*Agent, error) {
 		tools:             options.Tools,
 		maxToolIterations: maxToolIterations,
 		toolTimeout:       toolTimeout,
+		tokenBudget:       budget,
+		recentMessages:    recentMessages,
 	}, nil
 }
 

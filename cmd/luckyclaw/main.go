@@ -143,15 +143,18 @@ func buildAgents(
 			return nil, fmt.Errorf("创建 Agent %q 工具注册表: %w", id, err)
 		}
 		current, err := agent.New(agent.Options{
-			ID:                id,
-			Name:              agentCfg.Name,
-			DefaultModel:      agentCfg.DefaultModel,
-			Models:            agentCfg.Models,
-			SoulPath:          agentCfg.SoulPath,
-			SessionStore:      sessionStore,
-			Tools:             toolRegistry,
-			MaxToolIterations: agentCfg.MaxToolIterations,
-			ToolTimeout:       time.Duration(agentCfg.ToolTimeoutSeconds) * time.Second,
+			ID:                        id,
+			Name:                      agentCfg.Name,
+			DefaultModel:              agentCfg.DefaultModel,
+			Models:                    agentCfg.Models,
+			SoulPath:                  agentCfg.SoulPath,
+			SessionStore:              sessionStore,
+			Tools:                     toolRegistry,
+			MaxToolIterations:         agentCfg.MaxToolIterations,
+			ToolTimeout:               time.Duration(agentCfg.ToolTimeoutSeconds) * time.Second,
+			ContextWindowTokens:       agentCfg.ContextWindowTokens,
+			CompactionThresholdTokens: agentCfg.CompactionThresholdTokens,
+			CompactionRecentMessages:  agentCfg.CompactionRecentMessages,
 		}, providers)
 		if err != nil {
 			return nil, fmt.Errorf("创建 Agent %q: %w", id, err)

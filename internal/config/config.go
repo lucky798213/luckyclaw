@@ -25,6 +25,9 @@ const (
 	defaultWebListen                          = "127.0.0.1:8080"
 	defaultMaxToolIterations                  = 20
 	defaultToolTimeoutSeconds                 = 30
+	defaultContextWindowTokens                = 128000
+	defaultCompactionThresholdTokens          = 80000
+	defaultCompactionRecentMessages           = 20
 )
 
 // Config 保存 LuckyClaw 的运行配置。
@@ -103,12 +106,15 @@ type ProviderConfig struct {
 
 // AgentConfig 保存一个 Agent 的模型白名单和运行参数。
 type AgentConfig struct {
-	Name               string   `yaml:"name"`
-	SoulPath           string   `yaml:"soul_path"`
-	DefaultModel       string   `yaml:"default_model"`
-	Models             []string `yaml:"models"`
-	MaxToolIterations  int      `yaml:"max_tool_iterations,omitempty"`
-	ToolTimeoutSeconds int      `yaml:"tool_timeout_seconds,omitempty"`
+	Name                      string   `yaml:"name"`
+	SoulPath                  string   `yaml:"soul_path"`
+	DefaultModel              string   `yaml:"default_model"`
+	Models                    []string `yaml:"models"`
+	MaxToolIterations         int      `yaml:"max_tool_iterations,omitempty"`
+	ToolTimeoutSeconds        int      `yaml:"tool_timeout_seconds,omitempty"`
+	ContextWindowTokens       int      `yaml:"context_window_tokens,omitempty"`
+	CompactionThresholdTokens int      `yaml:"compaction_threshold_tokens,omitempty"`
+	CompactionRecentMessages  int      `yaml:"compaction_recent_messages,omitempty"`
 }
 
 // WithDefaults 返回补齐工具循环默认值后的 Agent 配置。
@@ -118,6 +124,15 @@ func (c AgentConfig) WithDefaults() AgentConfig {
 	}
 	if c.ToolTimeoutSeconds == 0 {
 		c.ToolTimeoutSeconds = defaultToolTimeoutSeconds
+	}
+	if c.ContextWindowTokens == 0 {
+		c.ContextWindowTokens = defaultContextWindowTokens
+	}
+	if c.CompactionThresholdTokens == 0 {
+		c.CompactionThresholdTokens = defaultCompactionThresholdTokens
+	}
+	if c.CompactionRecentMessages == 0 {
+		c.CompactionRecentMessages = defaultCompactionRecentMessages
 	}
 	return c
 }
@@ -259,6 +274,18 @@ func validate(cfg *Config) error {
 		}
 		if agentCfg.ToolTimeoutSeconds <= 0 {
 			return fmt.Errorf("agent %q tool_timeout_seconds must be greater than zero", agentID)
+		}
+		if agentCfg.ContextWindowTokens <= 0 {
+			return fmt.Errorf("agent %q context_window_tokens must be greater than zero", agentID)
+		}
+		if agentCfg.CompactionThresholdTokens <= 0 {
+			return fmt.Errorf("agent %q compaction_threshold_tokens must be greater than zero", agentID)
+		}
+		if agentCfg.CompactionThresholdTokens >= agentCfg.ContextWindowTokens {
+			return fmt.Errorf("agent %q compaction_threshold_tokens must be less than context_window_tokens", agentID)
+		}
+		if agentCfg.CompactionRecentMessages <= 0 {
+			return fmt.Errorf("agent %q compaction_recent_messages must be greater than zero", agentID)
 		}
 		allowed := make(map[string]struct{}, len(agentCfg.Models))
 		for _, raw := range agentCfg.Models {
