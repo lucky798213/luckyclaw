@@ -53,6 +53,14 @@ func (p *scriptedProvider) Chat(_ context.Context, messages []provider.Message, 
 	return &message, nil
 }
 
+func (p *scriptedProvider) ChatStream(ctx context.Context, messages []provider.Message, tools []provider.Tool, model string, maxTokens int, temperature float64) (provider.Stream, error) {
+	message, err := p.Chat(ctx, messages, tools, model, maxTokens, temperature)
+	if err != nil {
+		return nil, err
+	}
+	return &singleMessageStream{message: message}, nil
+}
+
 func (p *scriptedProvider) Requests() []scriptedProviderRequest {
 	p.mu.Lock()
 	defer p.mu.Unlock()

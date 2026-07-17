@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,6 +28,21 @@ type fakeProvider struct {
 	err      error
 }
 
+type singleMessageStream struct {
+	message *provider.Message
+	done    bool
+}
+
+func (s *singleMessageStream) Next() (provider.StreamChunk, error) {
+	if s.done {
+		return provider.StreamChunk{}, io.EOF
+	}
+	s.done = true
+	return provider.StreamChunk{Message: s.message, Done: true}, nil
+}
+
+func (s *singleMessageStream) Close() error { return nil }
+
 func (p *fakeProvider) Chat(_ context.Context, messages []provider.Message, _ []provider.Tool, model string, _ int, _ float64) (*provider.Message, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -41,6 +57,14 @@ func (p *fakeProvider) Chat(_ context.Context, messages []provider.Message, _ []
 		reply = "reply"
 	}
 	return &provider.Message{Role: "assistant", Content: reply}, nil
+}
+
+func (p *fakeProvider) ChatStream(ctx context.Context, messages []provider.Message, tools []provider.Tool, model string, maxTokens int, temperature float64) (provider.Stream, error) {
+	message, err := p.Chat(ctx, messages, tools, model, maxTokens, temperature)
+	if err != nil {
+		return nil, err
+	}
+	return &singleMessageStream{message: message}, nil
 }
 
 func (p *fakeProvider) callCount() int {
@@ -158,6 +182,25 @@ func TestHandleMessageIncludesPreviousMessages(t *testing.T) {
 		{Role: "user", Content: "second"},
 	}
 	assertMessages(t, prov.requests[1], want)
+}
+
+func TestHandleMessageStreamEmitsFinalEvent(t *testing.T) {
+	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
+	writeSoul(t, soulPath, "friendly")
+	prov := &fakeProvider{reply: "stream reply"}
+	a := newTestAgent(t, newProviderManager(t, "test", []string{"model"}, prov), soulPath, "test/model", []string{"test/model"})
+
+	events := a.HandleMessageStream(context.Background(), inbound("chat-stream", "hello"))
+	event, ok := <-events
+	if !ok {
+		t.Fatal("event stream closed before final event")
+	}
+	if event.Type != EventFinal || event.Data.Content != "stream reply" {
+		t.Fatalf("event = %+v", event)
+	}
+	if _, ok := <-events; ok {
+		t.Fatal("event stream contains unexpected extra event")
+	}
 }
 
 func TestHandleMessageReloadsSoul(t *testing.T) {

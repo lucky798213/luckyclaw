@@ -15,6 +15,10 @@ func (managerTestProvider) Chat(_ context.Context, _ []provider.Message, _ []pro
 	return &provider.Message{Role: "assistant", Content: "reply"}, nil
 }
 
+func (managerTestProvider) ChatStream(_ context.Context, _ []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (provider.Stream, error) {
+	return &singleMessageStream{message: &provider.Message{Role: "assistant", Content: "reply"}}, nil
+}
+
 func managerTestAgent(t *testing.T, id string) *Agent {
 	t.Helper()
 	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
