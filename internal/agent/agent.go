@@ -270,16 +270,26 @@ func (a *Agent) handleMessageWithEvents(ctx context.Context, msg bus.InboundMess
 	messages = append(messages, provider.Message{Role: "system", Content: soul})
 	messages = append(messages, history...)
 	messages = append(messages, userMessage)
+	return a.runConversation(ctx, resolved, currentSession, messages, []provider.Message{userMessage}, events, a.maxTokens, a.temperature)
+}
 
-	// 5. 初始化本轮工具循环状态。
+func (a *Agent) runConversation(
+	ctx context.Context,
+	resolved provider.ResolvedModel,
+	currentSession *session.Session,
+	messages []provider.Message,
+	pendingMessages []provider.Message,
+	events chan<- Event,
+	maxTokens int,
+	temperature float64,
+) (*provider.Message, error) {
+	// 初始化本轮工具循环状态。
 	// toolCallCounts 用于识别同名同参数的重复调用；failedRounds 用于连续失败降级。
 	toolDefinitions := a.tools.Definitions()
 	toolCallCounts := make(map[toolCallSignature]int)
-	// 本轮消息先暂存在内存中，只有产生最终答复后才会作为一个批次写入会话。
-	pendingMessages := []provider.Message{userMessage}
 	failedRounds := 0
 
-	// 6. ReAct 工具循环：模型决定是否调用工具，工具结果再反馈给模型继续推理。
+	// ReAct 工具循环：模型决定是否调用工具，工具结果再反馈给模型继续推理。
 	for iteration := 0; iteration < a.maxToolIterations; iteration++ {
 		// 正常模型调用始终携带完整工具定义，让模型可以选择直接回答或发起 ToolCalls。
 		assistantMessage, err := a.callModel(
@@ -287,8 +297,8 @@ func (a *Agent) handleMessageWithEvents(ctx context.Context, msg bus.InboundMess
 			resolved,
 			messages,
 			toolDefinitions,
-			a.maxTokens,
-			a.temperature,
+			maxTokens,
+			temperature,
 			events,
 		)
 		if err != nil {
@@ -306,7 +316,7 @@ func (a *Agent) handleMessageWithEvents(ctx context.Context, msg bus.InboundMess
 		if len(assistant.ToolCalls) == 0 {
 			// 空文本不能作为有效终点，因此禁用工具再请求模型做一次最终归纳。
 			if strings.TrimSpace(assistant.Content) == "" {
-				return a.synthesizeFinal(ctx, resolved, currentSession, messages, pendingMessages, "模型返回了空响应", events, a.maxTokens, a.temperature)
+				return a.synthesizeFinal(ctx, resolved, currentSession, messages, pendingMessages, "模型返回了空响应", events, maxTokens, temperature)
 			}
 			if err := appendFinalMessage(ctx, currentSession, pendingMessages, assistant); err != nil {
 				return nil, err
@@ -382,7 +392,7 @@ func (a *Agent) handleMessageWithEvents(ctx context.Context, msg bus.InboundMess
 
 		// 重复调用达到阈值后立即禁用工具，要求模型基于已有结果生成最终答复。
 		if repeatedCallDetected {
-			return a.synthesizeFinal(ctx, resolved, currentSession, messages, pendingMessages, "检测到重复工具调用", events, a.maxTokens, a.temperature)
+			return a.synthesizeFinal(ctx, resolved, currentSession, messages, pendingMessages, "检测到重复工具调用", events, maxTokens, temperature)
 		}
 
 		// 只有整轮工具全部失败才累计失败轮数；任一成功结果都会将计数清零。
@@ -393,12 +403,12 @@ func (a *Agent) handleMessageWithEvents(ctx context.Context, msg bus.InboundMess
 		}
 		// 连续三轮全部失败时停止继续试工具，避免在不可用服务或错误参数上反复消耗。
 		if failedRounds >= failedToolRoundLimit {
-			return a.synthesizeFinal(ctx, resolved, currentSession, messages, pendingMessages, "连续三轮工具调用全部失败", events, a.maxTokens, a.temperature)
+			return a.synthesizeFinal(ctx, resolved, currentSession, messages, pendingMessages, "连续三轮工具调用全部失败", events, maxTokens, temperature)
 		}
 	}
 
 	// 9. 用完最大迭代次数仍没有最终文本时，再进行一次不携带工具的强制归纳调用。
-	return a.synthesizeFinal(ctx, resolved, currentSession, messages, pendingMessages, fmt.Sprintf("已达到 %d 次工具迭代上限", a.maxToolIterations), events, a.maxTokens, a.temperature)
+	return a.synthesizeFinal(ctx, resolved, currentSession, messages, pendingMessages, fmt.Sprintf("已达到 %d 次工具迭代上限", a.maxToolIterations), events, maxTokens, temperature)
 }
 
 func (a *Agent) callModel(
@@ -520,6 +530,9 @@ func appendFinalMessage(
 	pendingMessages []provider.Message,
 	assistant provider.Message,
 ) error {
+	if currentSession == nil {
+		return nil
+	}
 	batch := make([]provider.Message, 0, len(pendingMessages)+1)
 	batch = append(batch, pendingMessages...)
 	batch = append(batch, assistant)

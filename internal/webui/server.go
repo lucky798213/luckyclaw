@@ -167,6 +167,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/agents/{agentID}/sessions/{sessionKey}/messages", s.sendMessage)
 	mux.HandleFunc("POST /api/agents/{agentID}/sessions/{sessionKey}/messages/stream", s.streamMessage)
 	mux.HandleFunc("PUT /api/agents/{agentID}/sessions/{sessionKey}/model", s.updateModel)
+	mux.HandleFunc("POST /v1/chat/completions", s.chatCompletions)
 	mux.HandleFunc("GET /", s.serveApp)
 	return securityHeaders(mux), nil
 }
@@ -692,7 +693,7 @@ func randomID() string {
 }
 
 func (s *Server) serveApp(w http.ResponseWriter, r *http.Request) {
-	if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/static/") {
+	if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/") || strings.HasPrefix(r.URL.Path, "/static/") {
 		http.NotFound(w, r)
 		return
 	}

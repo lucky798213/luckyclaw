@@ -196,3 +196,70 @@ func TestContextLockStopsWaitingAfterCancellation(t *testing.T) {
 	}
 	lock.Unlock()
 }
+
+func TestOpenAIChatCompletionsReturnsCompatibleResponseWithoutSession(t *testing.T) {
+	server, _ := newTestServer(t)
+	response := performJSONRequest(t, server.Handler(), http.MethodPost, "/v1/chat/completions", map[string]any{
+		"model": "test/chat",
+		"messages": []map[string]string{
+			{"role": "developer", "content": "回答要简短"},
+			{"role": "user", "content": "你好"},
+		},
+		"temperature": 0,
+		"max_tokens":  128,
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("completion status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["object"] != "chat.completion" || body["model"] != "test/chat" {
+		t.Fatalf("completion body=%#v", body)
+	}
+	choices := body["choices"].([]any)
+	message := choices[0].(map[string]any)["message"].(map[string]any)
+	if message["role"] != "assistant" || message["content"] != "网页回复" {
+		t.Fatalf("message=%#v", message)
+	}
+	sessions := performJSONRequest(t, server.Handler(), http.MethodGet, "/api/agents/lucky/sessions", nil)
+	if !bytes.Contains(sessions.Body.Bytes(), []byte(`"sessions":[]`)) {
+		t.Fatalf("无状态请求写入了会话: %s", sessions.Body.String())
+	}
+}
+
+func TestOpenAIChatCompletionsStreamsRoleContentAndDone(t *testing.T) {
+	server, _ := newTestServer(t)
+	response := performJSONRequest(t, server.Handler(), http.MethodPost, "/v1/chat/completions", map[string]any{
+		"model":    "test/chat",
+		"messages": []map[string]string{{"role": "user", "content": "你好"}},
+		"stream":   true,
+	})
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/event-stream; charset=utf-8" {
+		t.Fatalf("stream status=%d headers=%v body=%s", response.Code, response.Header(), response.Body.String())
+	}
+	body := response.Body.String()
+	rolePosition := strings.Index(body, `"delta":{"role":"assistant"}`)
+	contentPosition := strings.Index(body, `"delta":{"content":"网页"}`)
+	finishPosition := strings.Index(body, `"finish_reason":"stop"`)
+	donePosition := strings.Index(body, "data: [DONE]")
+	if rolePosition < 0 || contentPosition <= rolePosition || finishPosition <= contentPosition || donePosition <= finishPosition {
+		t.Fatalf("OpenAI 流顺序不正确: %s", body)
+	}
+}
+
+func TestOpenAIChatCompletionsRejectsUnsupportedClientTools(t *testing.T) {
+	server, _ := newTestServer(t)
+	response := performJSONRequest(t, server.Handler(), http.MethodPost, "/v1/chat/completions", map[string]any{
+		"model":    "test/chat",
+		"messages": []map[string]string{{"role": "user", "content": "你好"}},
+		"tools":    []any{},
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"type":"invalid_request_error"`)) || !bytes.Contains(response.Body.Bytes(), []byte(`"param":"tools"`)) {
+		t.Fatalf("error body=%s", response.Body.String())
+	}
+}

@@ -21,11 +21,13 @@ import (
 )
 
 type fakeProvider struct {
-	mu       sync.Mutex
-	requests [][]provider.Message
-	models   []string
-	reply    string
-	err      error
+	mu           sync.Mutex
+	requests     [][]provider.Message
+	models       []string
+	maxTokens    []int
+	temperatures []float64
+	reply        string
+	err          error
 }
 
 type singleMessageStream struct {
@@ -48,12 +50,14 @@ func (s *singleMessageStream) Next() (provider.StreamChunk, error) {
 
 func (s *singleMessageStream) Close() error { return nil }
 
-func (p *fakeProvider) Chat(_ context.Context, messages []provider.Message, _ []provider.Tool, model string, _ int, _ float64) (*provider.Message, error) {
+func (p *fakeProvider) Chat(_ context.Context, messages []provider.Message, _ []provider.Tool, model string, maxTokens int, temperature float64) (*provider.Message, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	request := append([]provider.Message(nil), messages...)
 	p.requests = append(p.requests, request)
 	p.models = append(p.models, model)
+	p.maxTokens = append(p.maxTokens, maxTokens)
+	p.temperatures = append(p.temperatures, temperature)
 	if p.err != nil {
 		return nil, p.err
 	}
@@ -212,6 +216,37 @@ func TestHandleMessageStreamEmitsFinalEvent(t *testing.T) {
 	}
 	if _, ok := <-events; ok {
 		t.Fatal("event stream contains unexpected extra event")
+	}
+}
+
+func TestCompleteUsesFullMessagesWithoutCreatingSession(t *testing.T) {
+	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
+	writeSoul(t, soulPath, "agent soul")
+	prov := &fakeProvider{reply: "completed"}
+	a := newTestAgent(t, newProviderManager(t, "test", []string{"model"}, prov), soulPath, "test/model", []string{"test/model"})
+	zero := 0.0
+	reply, err := a.Complete(context.Background(), []provider.Message{
+		{Role: "developer", Content: "developer instruction"},
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "previous answer"},
+		{Role: "user", Content: "continue"},
+	}, CompletionOptions{ModelRef: "test/model", MaxTokens: 123, Temperature: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Content != "completed" {
+		t.Fatalf("reply = %#v", reply)
+	}
+	want := []provider.Message{
+		{Role: "system", Content: "agent soul"},
+		{Role: "system", Content: "developer instruction"},
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "previous answer"},
+		{Role: "user", Content: "continue"},
+	}
+	assertMessages(t, prov.requests[0], want)
+	if prov.maxTokens[0] != 123 || prov.temperatures[0] != 0 {
+		t.Fatalf("options = max_tokens:%d temperature:%v", prov.maxTokens[0], prov.temperatures[0])
 	}
 }
 
