@@ -123,6 +123,37 @@ func TestSQLiteStorePersistsNewActiveSessionAndKeepsOldSession(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreListsAgentSessionsByChannel(t *testing.T) {
+	ctx := context.Background()
+	store := openTestSQLite(t, filepath.Join(t.TempDir(), "sessions.db"))
+	defer store.Close()
+	manager := NewManager("agent-a", store)
+	webSession, err := manager.CurrentSession(ctx, testAddress("web", "local-web", "chat-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := webSession.Append(ctx, provider.Message{Role: "user", Content: "网页消息"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.CurrentSession(ctx, testAddress("terminal", "local", "default")); err != nil {
+		t.Fatal(err)
+	}
+
+	summaries, err := store.ListByAgent(ctx, "agent-a", "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || summaries[0].Key != webSession.Key() {
+		t.Fatalf("web summaries = %+v", summaries)
+	}
+	if len(summaries[0].Messages) != 1 || summaries[0].Messages[0].Content != "网页消息" {
+		t.Fatalf("web messages = %+v", summaries[0].Messages)
+	}
+	if summaries[0].CreatedAt.IsZero() || summaries[0].UpdatedAt.IsZero() {
+		t.Fatalf("web timestamps = %+v", summaries[0])
+	}
+}
+
 func TestSQLiteStoreIsolatesAgentsAndThreads(t *testing.T) {
 	ctx := context.Background()
 	store := openTestSQLite(t, filepath.Join(t.TempDir(), "sessions.db"))

@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lucky798213/luckyclaw/internal/bus"
@@ -55,6 +56,7 @@ type Agent struct {
 	providers         *provider.Manager
 	sessionsManager   *session.Manager
 	soulPath          string
+	soulMu            sync.RWMutex
 	maxTokens         int
 	temperature       float64
 	tools             tools.Registry
@@ -226,7 +228,7 @@ func (a *Agent) handleModelCommand(ctx context.Context, address bus.Conversation
 // handleMessage 循环执行模型和工具，并在每个完整阶段成功后保存上下文。
 func (a *Agent) handleMessage(ctx context.Context, msg bus.InboundMessage) (*provider.Message, error) {
 	// 1. 每次处理消息时重新读取 Soul，使运行期间修改的角色设定可以立即生效。
-	soul, err := os.ReadFile(a.soulPath)
+	soul, err := a.ReadSoul()
 	if err != nil {
 		return nil, fmt.Errorf("read soul: %w", err)
 	}
@@ -260,7 +262,7 @@ func (a *Agent) handleMessage(ctx context.Context, msg bus.InboundMessage) (*pro
 	userMessage := provider.Message{Role: "user", Content: msg.Text}
 	history := currentSession.Messages()
 	messages := make([]provider.Message, 0, len(history)+2)
-	messages = append(messages, provider.Message{Role: "system", Content: string(soul)})
+	messages = append(messages, provider.Message{Role: "system", Content: soul})
 	messages = append(messages, history...)
 	messages = append(messages, userMessage)
 
@@ -541,4 +543,27 @@ func (a *Agent) Model() string { return a.defaultModel }
 // Models 返回 Agent 模型白名单的副本。
 func (a *Agent) Models() []string {
 	return append([]string(nil), a.allowedModels...)
+}
+
+// ReadSoul 读取 Agent 当前使用的角色设定。
+func (a *Agent) ReadSoul() (string, error) {
+	a.soulMu.RLock()
+	defer a.soulMu.RUnlock()
+	content, err := os.ReadFile(a.soulPath)
+	if err != nil {
+		return "", err
+	}
+	return string(content), nil
+}
+
+// UpdateSoul 保存 Agent 的角色设定，下一条消息会立即使用新内容。
+func (a *Agent) UpdateSoul(content string) error {
+	a.soulMu.Lock()
+	defer a.soulMu.Unlock()
+	return os.WriteFile(a.soulPath, []byte(content), 0o600)
+}
+
+// NewSession 为网页等控制面创建一段新的会话。
+func (a *Agent) NewSession(ctx context.Context, address bus.ConversationAddress) (*session.Session, error) {
+	return a.sessionsManager.NewSession(ctx, address)
 }

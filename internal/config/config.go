@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"net"
 	"os"
 	"sort"
 	"strings"
@@ -21,6 +22,7 @@ const (
 	defaultTaskQueueTimeoutSeconds            = 30
 	defaultTaskQueueMaxPendingPerConversation = 100
 	defaultStoragePath                        = "data/luckyclaw.db"
+	defaultWebListen                          = "127.0.0.1:8080"
 	defaultMaxToolIterations                  = 20
 	defaultToolTimeoutSeconds                 = 30
 )
@@ -33,6 +35,20 @@ type Config struct {
 	Bindings     []BindingConfig           `yaml:"bindings"`
 	TaskQueue    TaskQueueConfig           `yaml:"task_queue,omitempty"`
 	Storage      StorageConfig             `yaml:"storage,omitempty"`
+	Web          WebConfig                 `yaml:"web,omitempty"`
+}
+
+// WebConfig 保存网页工作台的监听配置。
+type WebConfig struct {
+	Listen string `yaml:"listen,omitempty"`
+}
+
+// WithDefaults 返回补齐默认监听地址后的网页配置。
+func (c WebConfig) WithDefaults() WebConfig {
+	if strings.TrimSpace(c.Listen) == "" {
+		c.Listen = defaultWebListen
+	}
+	return c
 }
 
 // StorageConfig 保存本地持久化配置。
@@ -138,6 +154,7 @@ func LoadFile(path string) (*Config, error) {
 	}
 	cfg.TaskQueue = cfg.TaskQueue.WithDefaults()
 	cfg.Storage = cfg.Storage.WithDefaults()
+	cfg.Web = cfg.Web.WithDefaults()
 	for agentID, agentCfg := range cfg.Agents {
 		cfg.Agents[agentID] = agentCfg.WithDefaults()
 	}
@@ -171,6 +188,9 @@ func resolveProviderAPIKeys(cfg *Config) error {
 func validate(cfg *Config) error {
 	if strings.TrimSpace(cfg.Storage.Path) == "" {
 		return fmt.Errorf("storage.path cannot be empty")
+	}
+	if _, _, err := net.SplitHostPort(cfg.Web.Listen); err != nil {
+		return fmt.Errorf("web.listen must be a valid host:port address: %w", err)
 	}
 	if cfg.TaskQueue.MaxConcurrent <= 0 {
 		return fmt.Errorf("task_queue.max_concurrent must be greater than zero")

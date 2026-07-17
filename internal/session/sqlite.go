@@ -200,6 +200,55 @@ func (s *SQLiteStore) LoadByKey(ctx context.Context, agentID, key string) (Recor
 	return scanRecord(row)
 }
 
+// ListByAgent 按最近更新时间倒序列出一个 Agent 的会话。
+// channel 为空时返回全部渠道，否则只返回指定渠道。
+func (s *SQLiteStore) ListByAgent(ctx context.Context, agentID, channel string) ([]Summary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT session_key, channel, account_id, chat_id, thread_id,
+			model_ref, messages_json, created_at, updated_at
+		FROM sessions
+		WHERE agent_id = ? AND (? = '' OR channel = ?)
+		ORDER BY updated_at DESC, created_at DESC`, agentID, channel, channel)
+	if err != nil {
+		return nil, fmt.Errorf("list agent sessions: %w", err)
+	}
+	defer rows.Close()
+
+	summaries := make([]Summary, 0)
+	for rows.Next() {
+		var summary Summary
+		var messagesJSON string
+		var createdAt int64
+		var updatedAt int64
+		if err := rows.Scan(
+			&summary.Key,
+			&summary.Address.Channel,
+			&summary.Address.AccountID,
+			&summary.Address.ChatID,
+			&summary.Address.ThreadID,
+			&summary.ModelRef,
+			&messagesJSON,
+			&createdAt,
+			&updatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan agent session summary: %w", err)
+		}
+		if err := json.Unmarshal([]byte(messagesJSON), &summary.Messages); err != nil {
+			return nil, fmt.Errorf("decode session %q messages: %w", summary.Key, err)
+		}
+		if summary.Messages == nil {
+			summary.Messages = []provider.Message{}
+		}
+		summary.CreatedAt = time.UnixMilli(createdAt)
+		summary.UpdatedAt = time.UnixMilli(updatedAt)
+		summaries = append(summaries, summary)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate agent sessions: %w", err)
+	}
+	return summaries, nil
+}
+
 // UpdateMessages 覆盖会话的工作消息集。
 func (s *SQLiteStore) UpdateMessages(ctx context.Context, agentID, key string, messages []provider.Message) error {
 	payload, err := marshalMessages(messages)

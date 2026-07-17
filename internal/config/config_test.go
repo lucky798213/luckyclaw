@@ -94,6 +94,22 @@ func TestLoadFileLoadsMultipleProvidersAgentsAndBindings(t *testing.T) {
 	if cfg.Storage.Path != "data/luckyclaw.db" {
 		t.Fatalf("storage path = %q", cfg.Storage.Path)
 	}
+	if cfg.Web.Listen != "127.0.0.1:8080" {
+		t.Fatalf("web listen = %q", cfg.Web.Listen)
+	}
+}
+
+func TestLoadFileLoadsWebListen(t *testing.T) {
+	content := strings.Replace(validConfigYAML, "default_agent: lucky", `default_agent: lucky
+web:
+  listen: 0.0.0.0:9090`, 1)
+	cfg, err := LoadFile(writeConfig(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Web.Listen != "0.0.0.0:9090" {
+		t.Fatalf("web listen = %q", cfg.Web.Listen)
+	}
 }
 
 func TestLoadFileRequiresProviderAPIKeyEnv(t *testing.T) {

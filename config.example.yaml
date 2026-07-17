@@ -26,6 +26,10 @@ default_agent: lucky
 storage:
   path: data/luckyclaw.db
 
+# 网页工作台默认只监听本机，启动后访问 http://127.0.0.1:8080。
+web:
+  listen: 127.0.0.1:8080
+
 # 以下字段省略或填写 0 时使用默认值：10、30 秒、每个会话等待 100 条。
 task_queue:
   max_concurrent: 10

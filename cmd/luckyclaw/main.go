@@ -18,6 +18,7 @@ import (
 	"github.com/lucky798213/luckyclaw/internal/provider"
 	"github.com/lucky798213/luckyclaw/internal/session"
 	"github.com/lucky798213/luckyclaw/internal/tools"
+	"github.com/lucky798213/luckyclaw/internal/webui"
 )
 
 func main() {
@@ -71,6 +72,15 @@ func main() {
 	defer stop()
 	ctx, cancel := context.WithCancel(signalCtx)
 	defer cancel()
+	webServer, err := webui.New(cfg.Web.Listen, agentManager, sessionStore, cfg.Bindings)
+	if err != nil {
+		log.Fatal(err)
+	}
+	webURL, err := webServer.Start(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("网页工作台已启动: %s", webURL)
 
 	gatewayDone := make(chan struct{})
 	go func() {
