@@ -36,9 +36,15 @@ type Config struct {
 	Agents       map[string]AgentConfig    `yaml:"agents"`
 	DefaultAgent string                    `yaml:"default_agent"`
 	Bindings     []BindingConfig           `yaml:"bindings"`
+	Skills       SkillsConfig              `yaml:"skills,omitempty"`
 	TaskQueue    TaskQueueConfig           `yaml:"task_queue,omitempty"`
 	Storage      StorageConfig             `yaml:"storage,omitempty"`
 	Web          WebConfig                 `yaml:"web,omitempty"`
+}
+
+// SkillsConfig 保存 SKILL.md 的顶层发现目录。
+type SkillsConfig struct {
+	Directories []string `yaml:"directories,omitempty"`
 }
 
 // WebConfig 保存网页工作台的监听配置。
@@ -110,6 +116,7 @@ type AgentConfig struct {
 	SoulPath                  string   `yaml:"soul_path"`
 	DefaultModel              string   `yaml:"default_model"`
 	Models                    []string `yaml:"models"`
+	Skills                    []string `yaml:"skills,omitempty"`
 	MaxToolIterations         int      `yaml:"max_tool_iterations,omitempty"`
 	ToolTimeoutSeconds        int      `yaml:"tool_timeout_seconds,omitempty"`
 	ContextWindowTokens       int      `yaml:"context_window_tokens,omitempty"`
@@ -216,6 +223,18 @@ func validate(cfg *Config) error {
 	if cfg.TaskQueue.MaxPendingPerConversation <= 0 {
 		return fmt.Errorf("task_queue.max_pending_per_conversation must be greater than zero")
 	}
+	seenSkillDirectories := make(map[string]struct{}, len(cfg.Skills.Directories))
+	for index, directory := range cfg.Skills.Directories {
+		directory = strings.TrimSpace(directory)
+		if directory == "" {
+			return fmt.Errorf("skills.directories[%d] cannot be empty", index)
+		}
+		if _, duplicate := seenSkillDirectories[directory]; duplicate {
+			return fmt.Errorf("skills directory %q is duplicated", directory)
+		}
+		seenSkillDirectories[directory] = struct{}{}
+		cfg.Skills.Directories[index] = directory
+	}
 
 	if len(cfg.Providers) == 0 {
 		return fmt.Errorf("config must contain at least one provider")
@@ -286,6 +305,17 @@ func validate(cfg *Config) error {
 		}
 		if agentCfg.CompactionRecentMessages <= 0 {
 			return fmt.Errorf("agent %q compaction_recent_messages must be greater than zero", agentID)
+		}
+		seenSkills := make(map[string]struct{}, len(agentCfg.Skills))
+		for _, rawName := range agentCfg.Skills {
+			name := strings.TrimSpace(rawName)
+			if name == "" {
+				return fmt.Errorf("agent %q skill name cannot be empty", agentID)
+			}
+			if _, duplicate := seenSkills[name]; duplicate {
+				return fmt.Errorf("agent %q skill %q is duplicated", agentID, name)
+			}
+			seenSkills[name] = struct{}{}
 		}
 		allowed := make(map[string]struct{}, len(agentCfg.Models))
 		for _, raw := range agentCfg.Models {

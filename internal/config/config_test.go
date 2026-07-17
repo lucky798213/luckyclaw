@@ -215,6 +215,26 @@ func TestLoadFileLoadsAgentToolConfig(t *testing.T) {
 	}
 }
 
+func TestLoadFileLoadsSkillConfiguration(t *testing.T) {
+	content := strings.Replace(validConfigYAML, "default_agent: lucky", `default_agent: lucky
+skills:
+  directories:
+    - skills`, 1)
+	content = strings.Replace(content, "    name: LuckyClaw", `    name: LuckyClaw
+    skills:
+      - code-runner`, 1)
+	cfg, err := LoadFile(writeConfig(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Skills.Directories) != 1 || cfg.Skills.Directories[0] != "skills" {
+		t.Fatalf("skills config = %+v", cfg.Skills)
+	}
+	if got := cfg.Agents["lucky"].Skills; len(got) != 1 || got[0] != "code-runner" {
+		t.Fatalf("agent skills = %v", got)
+	}
+}
+
 func TestLoadFileLoadsThreadBinding(t *testing.T) {
 	content := validConfigYAML + `
   - channel: feishu
