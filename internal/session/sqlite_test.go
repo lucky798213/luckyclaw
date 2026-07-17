@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -77,6 +79,96 @@ func TestSQLiteStoreRestoresCompleteSessionAfterRestart(t *testing.T) {
 	}
 	if got := reloaded.Messages(); !reflect.DeepEqual(got, wantMessages) {
 		t.Fatalf("messages = %#v, want %#v", got, wantMessages)
+	}
+}
+
+func TestSQLiteStorePersistsCompactionMetadataAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "sessions.db")
+	address := testAddress("terminal", "local", "default")
+	store := openTestSQLite(t, path)
+	manager := NewManager("agent-a", store)
+	current, err := manager.CurrentSession(ctx, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := []provider.Message{
+		{Role: "user", Content: "代号是银鲤"},
+		{Role: "assistant", Content: "已记住"},
+		{Role: "user", Content: "继续"},
+		{Role: "assistant", Content: "好的"},
+	}
+	if err := current.Append(ctx, messages...); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.ApplyCompaction(ctx, 0, "项目代号是银鲤。", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateCompaction(ctx, "agent-a", current.Key(), 0, "过期摘要", 3); !errors.Is(err, ErrCompactionConflict) {
+		t.Fatalf("乐观锁错误 = %v", err)
+	}
+	key := current.Key()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened := openTestSQLite(t, path)
+	defer reopened.Close()
+	record, exists, err := reopened.LoadByKey(ctx, "agent-a", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists || record.Summary != "项目代号是银鲤。" || record.CompactedUntil != 2 {
+		t.Fatalf("恢复的压缩元数据 = %+v, exists=%v", record, exists)
+	}
+	if !reflect.DeepEqual(record.Messages, messages) {
+		t.Fatalf("完整历史 = %+v, want %+v", record.Messages, messages)
+	}
+}
+
+func TestSQLiteStoreMigratesLegacyCompactionColumnsIdempotently(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE sessions (
+		agent_id TEXT NOT NULL,
+		session_key TEXT NOT NULL,
+		channel TEXT NOT NULL,
+		account_id TEXT NOT NULL,
+		chat_id TEXT NOT NULL,
+		thread_id TEXT NOT NULL,
+		model_ref TEXT NOT NULL DEFAULT '',
+		messages_json TEXT NOT NULL DEFAULT '[]',
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY (agent_id, session_key)
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`INSERT INTO sessions (
+		agent_id, session_key, channel, account_id, chat_id, thread_id,
+		model_ref, messages_json, created_at, updated_at
+	) VALUES ('agent-a', 'legacy', 'terminal', 'local', 'default', '', '', '[]', 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 0; attempt < 2; attempt++ {
+		store := openTestSQLite(t, path)
+		record, exists, err := store.LoadByKey(context.Background(), "agent-a", "legacy")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !exists || record.Summary != "" || record.CompactedUntil != 0 {
+			t.Fatalf("迁移后的记录 = %+v, exists=%v", record, exists)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -196,6 +288,7 @@ func TestSessionDoesNotMutateMemoryWhenSQLiteWriteFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantMessages := current.Messages()
+	wantSnapshot := current.ContextSnapshot()
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -211,6 +304,12 @@ func TestSessionDoesNotMutateMemoryWhenSQLiteWriteFails(t *testing.T) {
 	}
 	if got := current.ModelRef(); got != "openai/saved" {
 		t.Fatalf("model changed after failed write: %q", got)
+	}
+	if err := current.ApplyCompaction(ctx, 0, "不应保存", 1); err == nil {
+		t.Fatal("ApplyCompaction() error = nil after closing database")
+	}
+	if got := current.ContextSnapshot(); !reflect.DeepEqual(got, wantSnapshot) {
+		t.Fatalf("compaction changed after failed write: %+v", got)
 	}
 }
 

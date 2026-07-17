@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,13 +26,22 @@ type Manager struct {
 // Session 保存一段独立的会话历史。
 // Message 中只存 user 和模型回答。
 type Session struct {
-	mu       sync.RWMutex
-	agentID  string
-	store    Store
-	key      string
-	address  bus.ConversationAddress
-	modelRef string
-	messages []provider.Message
+	mu             sync.RWMutex
+	agentID        string
+	store          Store
+	key            string
+	address        bus.ConversationAddress
+	modelRef       string
+	messages       []provider.Message
+	summary        string
+	compactedUntil int
+}
+
+// ContextSnapshot 是构造模型上下文所需的完整会话快照。
+type ContextSnapshot struct {
+	Messages       []provider.Message
+	Summary        string
+	CompactedUntil int
 }
 
 // NewManager 创建一个会话管理器；store 为空时仅在内存中保存，供单元测试使用。
@@ -123,12 +133,14 @@ func (m *Manager) createSessionLocked(ctx context.Context, address bus.Conversat
 
 func (m *Manager) sessionFromRecord(record Record) *Session {
 	return &Session{
-		agentID:  m.agentID,
-		store:    m.store,
-		key:      record.Key,
-		address:  record.Address,
-		modelRef: record.ModelRef,
-		messages: append([]provider.Message(nil), record.Messages...),
+		agentID:        m.agentID,
+		store:          m.store,
+		key:            record.Key,
+		address:        record.Address,
+		modelRef:       record.ModelRef,
+		messages:       append([]provider.Message(nil), record.Messages...),
+		summary:        record.Summary,
+		compactedUntil: record.CompactedUntil,
 	}
 }
 
@@ -167,6 +179,40 @@ func (s *Session) Messages() []provider.Message {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]provider.Message(nil), s.messages...)
+}
+
+// ContextSnapshot 返回消息、旧消息摘要和压缩位置的一致副本。
+func (s *Session) ContextSnapshot() ContextSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return ContextSnapshot{
+		Messages:       append([]provider.Message(nil), s.messages...),
+		Summary:        s.summary,
+		CompactedUntil: s.compactedUntil,
+	}
+}
+
+// ApplyCompaction 原子保存新摘要和压缩位置；持久化失败时不修改内存状态。
+func (s *Session) ApplyCompaction(ctx context.Context, expectedUntil int, summary string, compactedUntil int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if expectedUntil != s.compactedUntil {
+		return ErrCompactionConflict
+	}
+	if compactedUntil < expectedUntil || compactedUntil > len(s.messages) {
+		return fmt.Errorf("invalid compacted position %d for %d messages", compactedUntil, len(s.messages))
+	}
+	if compactedUntil > 0 && strings.TrimSpace(summary) == "" {
+		return fmt.Errorf("compaction summary cannot be empty")
+	}
+	if s.store != nil {
+		if err := s.store.UpdateCompaction(ctx, s.agentID, s.key, expectedUntil, summary, compactedUntil); err != nil {
+			return err
+		}
+	}
+	s.summary = summary
+	s.compactedUntil = compactedUntil
+	return nil
 }
 
 // ModelRef 返回当前会话选择的模型；空字符串表示使用 Agent 默认模型。

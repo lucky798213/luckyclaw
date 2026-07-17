@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/lucky798213/luckyclaw/internal/bus"
@@ -116,6 +117,32 @@ func TestNewSessionDoesNotInheritModelSelection(t *testing.T) {
 	}
 	if got := current.ModelRef(); got != "openrouter/vendor/model" {
 		t.Fatalf("old session model = %q", got)
+	}
+}
+
+func TestSessionApplyCompactionKeepsCompleteMessages(t *testing.T) {
+	current := requireCurrentSession(t, newMemoryManager(), testAddress("terminal", "local", "default"))
+	messages := []provider.Message{
+		{Role: "user", Content: "第一轮"},
+		{Role: "assistant", Content: "回答一"},
+		{Role: "user", Content: "第二轮"},
+		{Role: "assistant", Content: "回答二"},
+	}
+	if err := current.Append(context.Background(), messages...); err != nil {
+		t.Fatal(err)
+	}
+	if err := current.ApplyCompaction(context.Background(), 0, "第一轮摘要", 2); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := current.ContextSnapshot()
+	if snapshot.Summary != "第一轮摘要" || snapshot.CompactedUntil != 2 {
+		t.Fatalf("上下文快照 = %+v", snapshot)
+	}
+	if len(snapshot.Messages) != len(messages) || snapshot.Messages[0].Content != "第一轮" {
+		t.Fatalf("压缩删除了原始消息: %+v", snapshot.Messages)
+	}
+	if err := current.ApplyCompaction(context.Background(), 0, "过期摘要", 3); !errors.Is(err, ErrCompactionConflict) {
+		t.Fatalf("过期压缩错误 = %v", err)
 	}
 }
 

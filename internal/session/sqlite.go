@@ -84,6 +84,8 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			thread_id TEXT NOT NULL,
 			model_ref TEXT NOT NULL DEFAULT '',
 			messages_json TEXT NOT NULL DEFAULT '[]',
+			summary TEXT NOT NULL DEFAULT '',
+			compacted_until INTEGER NOT NULL DEFAULT 0,
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL,
 			PRIMARY KEY (agent_id, session_key)
@@ -111,6 +113,12 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate sessions: %w", err)
 		}
 	}
+	if err := ensureSessionColumn(ctx, tx, "summary", `ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := ensureSessionColumn(ctx, tx, "compacted_until", `ALTER TABLE sessions ADD COLUMN compacted_until INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit session migration: %w", err)
 	}
@@ -133,8 +141,8 @@ func (s *SQLiteStore) CreateAndActivate(ctx context.Context, agentID string, rec
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO sessions (
 			agent_id, session_key, channel, account_id, chat_id, thread_id,
-			model_ref, messages_json, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			model_ref, messages_json, summary, compacted_until, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		agentID,
 		record.Key,
 		record.Address.Channel,
@@ -143,6 +151,8 @@ func (s *SQLiteStore) CreateAndActivate(ctx context.Context, agentID string, rec
 		record.Address.ThreadID,
 		record.ModelRef,
 		messages,
+		record.Summary,
+		record.CompactedUntil,
 		now,
 		now,
 	); err != nil {
@@ -175,7 +185,7 @@ func (s *SQLiteStore) CreateAndActivate(ctx context.Context, agentID string, rec
 func (s *SQLiteStore) LoadActive(ctx context.Context, agentID string, address bus.ConversationAddress) (Record, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT s.session_key, s.channel, s.account_id, s.chat_id, s.thread_id,
-			s.model_ref, s.messages_json
+			s.model_ref, s.messages_json, s.summary, s.compacted_until
 		FROM active_sessions AS a
 		JOIN sessions AS s
 			ON s.agent_id = a.agent_id AND s.session_key = a.session_key
@@ -194,7 +204,7 @@ func (s *SQLiteStore) LoadActive(ctx context.Context, agentID string, address bu
 func (s *SQLiteStore) LoadByKey(ctx context.Context, agentID, key string) (Record, bool, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT session_key, channel, account_id, chat_id, thread_id,
-			model_ref, messages_json
+			model_ref, messages_json, summary, compacted_until
 		FROM sessions
 		WHERE agent_id = ? AND session_key = ?`, agentID, key)
 	return scanRecord(row)
@@ -279,6 +289,41 @@ func (s *SQLiteStore) UpdateModelRef(ctx context.Context, agentID, key, modelRef
 	return requireUpdated(result, key)
 }
 
+// UpdateCompaction 使用旧位置作乐观锁，原子推进摘要和压缩游标。
+func (s *SQLiteStore) UpdateCompaction(
+	ctx context.Context,
+	agentID string,
+	key string,
+	expectedUntil int,
+	summary string,
+	compactedUntil int,
+) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE sessions
+		SET summary = ?, compacted_until = ?, updated_at = ?
+		WHERE agent_id = ? AND session_key = ? AND compacted_until = ?`,
+		summary, compactedUntil, time.Now().UnixMilli(), agentID, key, expectedUntil)
+	if err != nil {
+		return fmt.Errorf("update session compaction %q: %w", key, err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read compaction update result for session %q: %w", key, err)
+	}
+	if count > 0 {
+		return nil
+	}
+	var exists int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM sessions WHERE agent_id = ? AND session_key = ?`, agentID, key).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: %s", errSessionNotFound, key)
+		}
+		return fmt.Errorf("check session compaction conflict %q: %w", key, err)
+	}
+	return ErrCompactionConflict
+}
+
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -294,6 +339,8 @@ func scanRecord(row rowScanner) (Record, bool, error) {
 		&record.Address.ThreadID,
 		&record.ModelRef,
 		&messagesJSON,
+		&record.Summary,
+		&record.CompactedUntil,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Record{}, false, nil
@@ -306,7 +353,46 @@ func scanRecord(row rowScanner) (Record, bool, error) {
 	if record.Messages == nil {
 		record.Messages = []provider.Message{}
 	}
+	if record.CompactedUntil < 0 || record.CompactedUntil > len(record.Messages) {
+		return Record{}, false, fmt.Errorf("decode session %q: compacted position %d exceeds %d messages", record.Key, record.CompactedUntil, len(record.Messages))
+	}
+	if record.CompactedUntil > 0 && strings.TrimSpace(record.Summary) == "" {
+		return Record{}, false, fmt.Errorf("decode session %q: compacted summary is empty", record.Key)
+	}
 	return record, true, nil
+}
+
+func ensureSessionColumn(ctx context.Context, tx *sql.Tx, column, alterStatement string) error {
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(sessions)`)
+	if err != nil {
+		return fmt.Errorf("inspect sessions columns: %w", err)
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var name string
+		var columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan sessions columns: %w", err)
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close sessions columns: %w", err)
+	}
+	if found {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, alterStatement); err != nil {
+		return fmt.Errorf("add sessions column %q: %w", column, err)
+	}
+	return nil
 }
 
 func marshalMessages(messages []provider.Message) (string, error) {
