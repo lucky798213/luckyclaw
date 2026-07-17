@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,11 +20,34 @@ type capturingProvider struct {
 	tools []provider.Tool
 }
 
+type capturingStream struct {
+	message *provider.Message
+	done    bool
+}
+
+func (s *capturingStream) Next() (provider.StreamChunk, error) {
+	if s.done {
+		return provider.StreamChunk{}, io.EOF
+	}
+	s.done = true
+	return provider.StreamChunk{Done: true, Message: s.message}, nil
+}
+
+func (s *capturingStream) Close() error { return nil }
+
 func (p *capturingProvider) Chat(_ context.Context, _ []provider.Message, tools []provider.Tool, _ string, _ int, _ float64) (*provider.Message, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.tools = append([]provider.Tool(nil), tools...)
 	return &provider.Message{Role: "assistant", Content: "reply"}, nil
+}
+
+func (p *capturingProvider) ChatStream(ctx context.Context, messages []provider.Message, tools []provider.Tool, model string, maxTokens int, temperature float64) (provider.Stream, error) {
+	message, err := p.Chat(ctx, messages, tools, model, maxTokens, temperature)
+	if err != nil {
+		return nil, err
+	}
+	return &capturingStream{message: message}, nil
 }
 
 func TestWaitForShutdownCancelsAndWaitsAfterTerminalEOF(t *testing.T) {

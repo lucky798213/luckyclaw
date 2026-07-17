@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/lucky798213/luckyclaw/internal/agent"
 	"github.com/lucky798213/luckyclaw/internal/provider"
@@ -51,6 +54,10 @@ func (webTestProvider) ChatStream(_ context.Context, _ []provider.Message, _ []p
 }
 
 func newTestServer(t *testing.T) (*Server, string) {
+	return newTestServerWithProvider(t, webTestProvider{})
+}
+
+func newTestServerWithProvider(t *testing.T, currentProvider provider.Provider) (*Server, string) {
 	t.Helper()
 	temporary := t.TempDir()
 	soulPath := filepath.Join(temporary, "SOUL.md")
@@ -58,7 +65,7 @@ func newTestServer(t *testing.T) (*Server, string) {
 		t.Fatal(err)
 	}
 	providerManager := provider.NewManager()
-	if err := providerManager.Register("test", webTestProvider{}, []string{"chat"}); err != nil {
+	if err := providerManager.Register("test", currentProvider, []string{"chat"}); err != nil {
 		t.Fatal(err)
 	}
 	registry, err := tools.NewDefaultRegistry()
@@ -275,5 +282,164 @@ func TestEmbeddedAppUsesStreamingChatAndAbortController(t *testing.T) {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("app.js 缺少 %q", expected)
 		}
+	}
+}
+
+type blockingWebProvider struct {
+	started    chan struct{}
+	cancelled  chan struct{}
+	closed     chan struct{}
+	startOnce  sync.Once
+	cancelOnce sync.Once
+	closeOnce  sync.Once
+}
+
+func newBlockingWebProvider() *blockingWebProvider {
+	return &blockingWebProvider{
+		started:   make(chan struct{}),
+		cancelled: make(chan struct{}),
+		closed:    make(chan struct{}),
+	}
+}
+
+func (p *blockingWebProvider) Chat(context.Context, []provider.Message, []provider.Tool, string, int, float64) (*provider.Message, error) {
+	return nil, errors.New("unexpected synchronous request")
+}
+
+func (p *blockingWebProvider) ChatStream(ctx context.Context, _ []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (provider.Stream, error) {
+	return &blockingWebStream{ctx: ctx, provider: p}, nil
+}
+
+type blockingWebStream struct {
+	ctx      context.Context
+	provider *blockingWebProvider
+}
+
+func (s *blockingWebStream) Next() (provider.StreamChunk, error) {
+	s.provider.startOnce.Do(func() { close(s.provider.started) })
+	<-s.ctx.Done()
+	s.provider.cancelOnce.Do(func() { close(s.provider.cancelled) })
+	return provider.StreamChunk{}, s.ctx.Err()
+}
+
+func (s *blockingWebStream) Close() error {
+	s.provider.closeOnce.Do(func() { close(s.provider.closed) })
+	return nil
+}
+
+func TestStreamClientDisconnectCancelsProviderAndDiscardsSessionTurn(t *testing.T) {
+	currentProvider := newBlockingWebProvider()
+	server, _ := newTestServerWithProvider(t, currentProvider)
+	created := performJSONRequest(t, server.Handler(), http.MethodPost, "/api/agents/lucky/sessions", nil)
+	var createdSession sessionView
+	if err := json.NewDecoder(created.Body).Decode(&createdSession); err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(server.Handler())
+	defer httpServer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		httpServer.URL+"/api/agents/lucky/sessions/"+createdSession.Key+"/messages/stream",
+		strings.NewReader(`{"text":"等待"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := httpServer.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForWebSignal(t, currentProvider.started, "Provider 没有开始流式读取")
+	cancel()
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	waitForWebSignal(t, currentProvider.cancelled, "客户端断开没有取消 Provider")
+	waitForWebSignal(t, currentProvider.closed, "取消后没有关闭 Provider 流")
+
+	loaded := performJSONRequest(t, server.Handler(), http.MethodGet,
+		"/api/agents/lucky/sessions/"+createdSession.Key, nil)
+	var view sessionView
+	if err := json.NewDecoder(loaded.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Messages) != 0 {
+		t.Fatalf("取消请求后保存了消息: %#v", view.Messages)
+	}
+}
+
+type toolSequenceProvider struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (p *toolSequenceProvider) Chat(context.Context, []provider.Message, []provider.Tool, string, int, float64) (*provider.Message, error) {
+	return nil, errors.New("unexpected synchronous request")
+}
+
+func (p *toolSequenceProvider) ChatStream(context.Context, []provider.Message, []provider.Tool, string, int, float64) (provider.Stream, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	if p.calls == 1 {
+		return &webChunkStream{chunks: []provider.StreamChunk{{Done: true, Message: &provider.Message{
+			Role: "assistant",
+			ToolCalls: []provider.ToolCall{{
+				ID:   "call-calc",
+				Type: "function",
+				Function: provider.FunctionCall{
+					Name:      "calculator",
+					Arguments: `{"expression":"1+1"}`,
+				},
+			}},
+		}}}}, nil
+	}
+	return &webChunkStream{chunks: []provider.StreamChunk{
+		{Delta: "结果是 2。"},
+		{Done: true, Message: &provider.Message{Role: "assistant", Content: "结果是 2。"}},
+	}}, nil
+}
+
+type webChunkStream struct {
+	chunks []provider.StreamChunk
+	index  int
+}
+
+func (s *webChunkStream) Next() (provider.StreamChunk, error) {
+	if s.index >= len(s.chunks) {
+		return provider.StreamChunk{}, io.EOF
+	}
+	chunk := s.chunks[s.index]
+	s.index++
+	return chunk, nil
+}
+
+func (s *webChunkStream) Close() error { return nil }
+
+func TestOpenAIStreamHidesInternalToolEvents(t *testing.T) {
+	server, _ := newTestServerWithProvider(t, &toolSequenceProvider{})
+	response := performJSONRequest(t, server.Handler(), http.MethodPost, "/v1/chat/completions", map[string]any{
+		"model":    "test/chat",
+		"messages": []map[string]string{{"role": "user", "content": "计算 1+1"}},
+		"stream":   true,
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if strings.Contains(body, "tool_start") || strings.Contains(body, "tool_result") || strings.Contains(body, "call-calc") {
+		t.Fatalf("OpenAI 流暴露了内部工具事件: %s", body)
+	}
+	if !strings.Contains(body, `"content":"结果是 2。"`) || !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("OpenAI 流缺少最终文本: %s", body)
+	}
+}
+
+func waitForWebSignal(t *testing.T, signal <-chan struct{}, failure string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		t.Fatal(failure)
 	}
 }

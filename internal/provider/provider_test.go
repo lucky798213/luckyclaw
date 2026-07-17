@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenAIProviderBuildRequestConvertsMessages(t *testing.T) {
@@ -190,5 +192,135 @@ func TestOpenAIProviderChatStreamAssemblesContentAndToolCalls(t *testing.T) {
 	}
 	if len(final.RawAssistant) == 0 {
 		t.Fatal("final RawAssistant is empty")
+	}
+}
+
+func TestOpenAIProviderChatStreamRejectsNonOKResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	current, err := NewOpenAI("test-key", server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = current.ChatStream(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, "test-model", 100, 0.7)
+	if err == nil || !strings.Contains(err.Error(), "API error 503") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestOpenAIProviderChatStreamReportsMalformedChunkAndUnexpectedEOF(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		nextCalls int
+		want      string
+	}{
+		{name: "畸形 JSON", body: "data: not-json\n\n", nextCalls: 1, want: "decode stream chunk"},
+		{name: "缺少 DONE", body: "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n", nextCalls: 2, want: io.ErrUnexpectedEOF.Error()},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer server.Close()
+			current, err := NewOpenAI("test-key", server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream, err := current.ChatStream(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, "test-model", 100, 0.7)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.Close()
+			for index := 0; index < test.nextCalls-1; index++ {
+				if _, err := stream.Next(); err != nil {
+					t.Fatalf("Next() %d error = %v", index+1, err)
+				}
+			}
+			_, err = stream.Next()
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestOpenAIProviderChatStreamCancellationReachesUpstream(t *testing.T) {
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(started)
+		<-r.Context().Done()
+		close(cancelled)
+	}))
+	defer server.Close()
+	current, err := NewOpenAI("test-key", server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, err := current.ChatStream(ctx, []Message{{Role: "user", Content: "hi"}}, nil, "test-model", 100, 0.7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	cancel()
+	if _, err := stream.Next(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Next() error = %v", err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("上游请求没有收到取消信号")
+	}
+}
+
+type trackingBody struct {
+	io.Reader
+	closed bool
+}
+
+func (b *trackingBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func TestOpenAIProviderStreamCloseClosesResponseBodyOnce(t *testing.T) {
+	body := &trackingBody{Reader: strings.NewReader("data: [DONE]\n\n")}
+	current, err := NewOpenAI("test-key", "https://api.example.com/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: body, Header: make(http.Header)}, nil
+	})}
+	stream, err := current.ChatStream(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil, "test-model", 100, 0.7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !body.closed {
+		t.Fatal("关闭流时没有关闭响应体")
 	}
 }

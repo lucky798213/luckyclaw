@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,8 +20,34 @@ type fakeProvider struct {
 	reply string
 }
 
+type gatewayTestStream struct {
+	message *provider.Message
+	done    bool
+}
+
+func (s *gatewayTestStream) Next() (provider.StreamChunk, error) {
+	if s.done {
+		return provider.StreamChunk{}, io.EOF
+	}
+	s.done = true
+	return provider.StreamChunk{Done: true, Message: s.message}, nil
+}
+
+func (s *gatewayTestStream) Close() error { return nil }
+
+func streamFromChat(message *provider.Message, err error) (provider.Stream, error) {
+	if err != nil {
+		return nil, err
+	}
+	return &gatewayTestStream{message: message}, nil
+}
+
 func (p *fakeProvider) Chat(_ context.Context, _ []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.Message, error) {
 	return &provider.Message{Role: "assistant", Content: p.reply}, nil
+}
+
+func (p *fakeProvider) ChatStream(ctx context.Context, messages []provider.Message, tools []provider.Tool, model string, maxTokens int, temperature float64) (provider.Stream, error) {
+	return streamFromChat(p.Chat(ctx, messages, tools, model, maxTokens, temperature))
 }
 
 type controlledProvider struct {
@@ -41,6 +68,10 @@ func (p *controlledProvider) Chat(ctx context.Context, messages []provider.Messa
 	return &provider.Message{Role: "assistant", Content: text + " reply"}, nil
 }
 
+func (p *controlledProvider) ChatStream(ctx context.Context, messages []provider.Message, tools []provider.Tool, model string, maxTokens int, temperature float64) (provider.Stream, error) {
+	return streamFromChat(p.Chat(ctx, messages, tools, model, maxTokens, temperature))
+}
+
 type timeoutProvider struct {
 	started   chan struct{}
 	cancelled chan struct{}
@@ -51,6 +82,10 @@ func (p *timeoutProvider) Chat(ctx context.Context, _ []provider.Message, _ []pr
 	<-ctx.Done()
 	close(p.cancelled)
 	return nil, ctx.Err()
+}
+
+func (p *timeoutProvider) ChatStream(ctx context.Context, messages []provider.Message, tools []provider.Tool, model string, maxTokens int, temperature float64) (provider.Stream, error) {
+	return streamFromChat(p.Chat(ctx, messages, tools, model, maxTokens, temperature))
 }
 
 func newTestAgent(t *testing.T, id, reply string) *agent.Agent {
