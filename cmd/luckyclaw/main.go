@@ -17,6 +17,7 @@ import (
 	"github.com/lucky798213/luckyclaw/internal/gateway"
 	"github.com/lucky798213/luckyclaw/internal/provider"
 	"github.com/lucky798213/luckyclaw/internal/session"
+	"github.com/lucky798213/luckyclaw/internal/skills"
 	"github.com/lucky798213/luckyclaw/internal/tools"
 	"github.com/lucky798213/luckyclaw/internal/webui"
 )
@@ -42,7 +43,11 @@ func main() {
 		}
 	}()
 
-	agents, err := buildAgents(cfg.Agents, providerManager, sessionStore)
+	skillCatalog, err := skills.Discover(cfg.Skills.Directories)
+	if err != nil {
+		log.Fatal(err)
+	}
+	agents, err := buildAgents(cfg.Agents, providerManager, sessionStore, skillCatalog)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -128,6 +133,7 @@ func buildAgents(
 	configs map[string]config.AgentConfig,
 	providers *provider.Manager,
 	sessionStore session.Store,
+	skillCatalog *skills.Catalog,
 ) (map[string]*agent.Agent, error) {
 	ids := make([]string, 0, len(configs))
 	for id := range configs {
@@ -139,6 +145,17 @@ func buildAgents(
 	for _, id := range ids {
 		agentCfg := configs[id]
 		var statefulTools []tools.Tool
+		selectedSkills, err := skillCatalog.Select(agentCfg.Skills)
+		if err != nil {
+			return nil, fmt.Errorf("选择 Agent %q Skills: %w", id, err)
+		}
+		if len(selectedSkills) > 0 {
+			loadSkill, err := tools.NewLoadSkillTool(selectedSkills)
+			if err != nil {
+				return nil, fmt.Errorf("创建 Agent %q Skill 工具: %w", id, err)
+			}
+			statefulTools = append(statefulTools, loadSkill)
+		}
 		if sessionStore != nil {
 			memorySearch, err := tools.NewMemorySearchTool(sessionStore, id)
 			if err != nil {
@@ -158,6 +175,7 @@ func buildAgents(
 			SoulPath:                  agentCfg.SoulPath,
 			SessionStore:              sessionStore,
 			Tools:                     toolRegistry,
+			SkillsSummary:             skills.BuildSummary(selectedSkills),
 			MaxToolIterations:         agentCfg.MaxToolIterations,
 			ToolTimeout:               time.Duration(agentCfg.ToolTimeoutSeconds) * time.Second,
 			ContextWindowTokens:       agentCfg.ContextWindowTokens,

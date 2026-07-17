@@ -47,6 +47,8 @@ type Options struct {
 	Temperature  float64
 	SessionStore session.Store
 	Tools        tools.Registry
+	// SkillsSummary 是只包含当前 Agent Skill 名称和描述的常驻目录。
+	SkillsSummary string
 	// MaxToolIterations 限制一次用户请求可以经历的模型工具轮数。
 	MaxToolIterations int
 	// ToolTimeout 限制单次工具执行时间。
@@ -73,6 +75,7 @@ type Agent struct {
 	maxTokens         int
 	temperature       float64
 	tools             tools.Registry
+	skillsSummary     string
 	maxToolIterations int
 	toolTimeout       time.Duration
 	tokenBudget       tokenBudget
@@ -204,6 +207,7 @@ func New(options Options, providers *provider.Manager) (*Agent, error) {
 		maxTokens:         maxTokens,
 		temperature:       temperature,
 		tools:             options.Tools,
+		skillsSummary:     strings.TrimSpace(options.SkillsSummary),
 		maxToolIterations: maxToolIterations,
 		toolTimeout:       toolTimeout,
 		tokenBudget:       budget,
@@ -289,7 +293,7 @@ func (a *Agent) handleMessage(ctx context.Context, msg bus.InboundMessage) (*pro
 
 func (a *Agent) handleMessageWithEvents(ctx context.Context, msg bus.InboundMessage, events chan<- Event) (*provider.Message, error) {
 	// 1. 每次处理消息时重新读取 Soul，使运行期间修改的角色设定可以立即生效。
-	soul, err := a.ReadSoul()
+	soul, err := a.readSystemPrompt()
 	if err != nil {
 		return nil, fmt.Errorf("read soul: %w", err)
 	}
@@ -704,6 +708,17 @@ func (a *Agent) ReadSoul() (string, error) {
 		return "", err
 	}
 	return string(content), nil
+}
+
+func (a *Agent) readSystemPrompt() (string, error) {
+	soul, err := a.ReadSoul()
+	if err != nil {
+		return "", err
+	}
+	if a.skillsSummary == "" {
+		return soul, nil
+	}
+	return strings.TrimSpace(soul) + "\n\n" + a.skillsSummary, nil
 }
 
 // UpdateSoul 保存 Agent 的角色设定，下一条消息会立即使用新内容。

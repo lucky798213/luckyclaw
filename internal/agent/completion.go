@@ -63,7 +63,7 @@ func (a *Agent) prepareCompletion(messages []provider.Message, options Completio
 	if err != nil {
 		return provider.ResolvedModel{}, nil, 0, 0, fmt.Errorf("resolve model: %w", err)
 	}
-	soul, err := a.ReadSoul()
+	soul, err := a.readSystemPrompt()
 	if err != nil {
 		return provider.ResolvedModel{}, nil, 0, 0, fmt.Errorf("read soul: %w", err)
 	}

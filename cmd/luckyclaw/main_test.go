@@ -14,6 +14,7 @@ import (
 	"github.com/lucky798213/luckyclaw/internal/config"
 	"github.com/lucky798213/luckyclaw/internal/provider"
 	"github.com/lucky798213/luckyclaw/internal/session"
+	"github.com/lucky798213/luckyclaw/internal/skills"
 )
 
 type capturingProvider struct {
@@ -125,7 +126,7 @@ func TestBuildAgentsWiresDefaultTools(t *testing.T) {
 			MaxToolIterations:  4,
 			ToolTimeoutSeconds: 2,
 		},
-	}, providers, store)
+	}, providers, store, mustEmptySkillCatalog(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +148,15 @@ func TestBuildAgentsWiresDefaultTools(t *testing.T) {
 	if !reflect.DeepEqual(names, []string{"calculator", "current_time", "http_fetch", "memory_search"}) {
 		t.Fatalf("tools = %v", names)
 	}
+}
+
+func mustEmptySkillCatalog(t *testing.T) *skills.Catalog {
+	t.Helper()
+	catalog, err := skills.Discover(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return catalog
 }
 
 func waitForDone(t *testing.T, done <-chan struct{}, failure string) {

@@ -193,6 +193,28 @@ func TestHandleMessageIncludesPreviousMessages(t *testing.T) {
 	assertMessages(t, prov.requests[1], want)
 }
 
+func TestHandleMessageInjectsSkillsSummary(t *testing.T) {
+	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
+	writeSoul(t, soulPath, "friendly")
+	prov := &fakeProvider{}
+	agent, err := New(Options{
+		ID:            "lucky",
+		Name:          "LuckyClaw",
+		DefaultModel:  "test/model",
+		Models:        []string{"test/model"},
+		SoulPath:      soulPath,
+		Tools:         newDefaultToolRegistry(t),
+		SkillsSummary: "# 可用 Skills\n- code-runner: run code",
+	}, newProviderManager(t, "test", []string{"model"}, prov))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent.HandleMessage(context.Background(), inbound("skill-chat", "hello"))
+	if got := prov.requests[0][0].Content; !strings.Contains(got, "friendly") || !strings.Contains(got, "code-runner") {
+		t.Fatalf("system prompt = %q", got)
+	}
+}
+
 func TestHandleMessageStreamEmitsFinalEvent(t *testing.T) {
 	soulPath := filepath.Join(t.TempDir(), "SOUL.md")
 	writeSoul(t, soulPath, "friendly")
