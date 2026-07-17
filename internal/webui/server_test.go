@@ -263,3 +263,17 @@ func TestOpenAIChatCompletionsRejectsUnsupportedClientTools(t *testing.T) {
 		t.Fatalf("error body=%s", response.Body.String())
 	}
 }
+
+func TestEmbeddedAppUsesStreamingChatAndAbortController(t *testing.T) {
+	server, _ := newTestServer(t)
+	response := performJSONRequest(t, server.Handler(), http.MethodGet, "/static/app.js", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("app.js status=%d", response.Code)
+	}
+	body := response.Body.String()
+	for _, expected := range []string{"/messages/stream", "new AbortController()", "tool_start", "tool_result", "data-stream-assistant", "停止生成"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("app.js 缺少 %q", expected)
+		}
+	}
+}

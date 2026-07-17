@@ -11,6 +11,7 @@ const state = {
   sidebarOpen: false,
   settingsTab: "soul",
   soulDraft: "",
+  streamAbort: null,
 };
 
 const icons = {
@@ -22,6 +23,7 @@ const icons = {
   moon: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.2 15.3A8.5 8.5 0 0 1 8.7 3.8 8.5 8.5 0 1 0 20.2 15.3Z"/></svg>`,
   plus: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>`,
   send: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>`,
+  stop: `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" stroke="none"/></svg>`,
   settings: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg>`,
   spark: `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5Z"/><path d="m18.5 15 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8Z"/></svg>`,
   sun: `<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>`,
@@ -89,8 +91,13 @@ function applyTheme(theme) {
 
 function toggleTheme() {
   applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
-  if (state.agent) renderWorkspace();
-  else renderHome();
+  const button = document.querySelector(".theme-toggle");
+  const dark = document.documentElement.dataset.theme === "dark";
+  if (button) {
+    button.innerHTML = dark ? icons.sun : icons.moon;
+    button.setAttribute("aria-label", `切换为${dark ? "浅色" : "深色"}主题`);
+    button.setAttribute("title", "切换主题");
+  }
 }
 
 function themeButton() {
@@ -268,7 +275,7 @@ function chatMarkup() {
         <form class="composer" id="composer">
           <div class="composer-row">
             <textarea id="message-input" rows="1" maxlength="20000" aria-label="发送给 Agent 的消息" placeholder="${state.session ? `给 ${escapeHTML(state.agent.name)} 发送消息…` : "先创建一段新会话…"}" ${!state.session || state.busy ? "disabled" : ""}></textarea>
-            <button class="send-button" type="submit" aria-label="发送消息" ${!state.session || state.busy ? "disabled" : ""}>${icons.send}</button>
+            <button class="send-button ${state.busy ? "stop" : ""}" type="${state.busy ? "button" : "submit"}" aria-label="${state.busy ? "停止生成" : "发送消息"}" ${!state.session ? "disabled" : ""}>${state.busy ? icons.stop : icons.send}</button>
           </div>
           <div class="composer-meta"><span>Enter 发送 · Shift + Enter 换行</span><span>AI 可能会犯错，请核对重要信息</span></div>
         </form>
@@ -400,10 +407,12 @@ function bindCommonActions() {
 function bindWorkspaceActions(isSettings) {
   bindCommonActions();
   document.querySelector("#mobile-menu")?.addEventListener("click", () => {
+    abortActiveStream();
     state.sidebarOpen = true;
     renderWorkspace();
   });
   document.querySelector(".sidebar-scrim")?.addEventListener("click", () => {
+    abortActiveStream();
     state.sidebarOpen = false;
     renderWorkspace();
   });
@@ -425,6 +434,7 @@ function bindWorkspaceActions(isSettings) {
 
 function bindChatActions() {
   document.querySelector("#composer")?.addEventListener("submit", sendCurrentMessage);
+  document.querySelector(".send-button.stop")?.addEventListener("click", stopCurrentStream);
   const input = document.querySelector("#message-input");
   input?.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -499,23 +509,184 @@ async function sendCurrentMessage(event) {
   const input = document.querySelector("#message-input");
   const text = input?.value.trim();
   if (!text || !state.session || state.busy) return;
+  const agentID = state.agent.id;
+  const sessionKey = state.session.key;
+  const controller = new AbortController();
+  state.streamAbort = controller;
   state.busy = true;
   state.session.messages = [...(state.session.messages || []), { role: "user", content: text }];
   renderWorkspace();
+  let finalReceived = false;
   try {
-    const result = await api(`/api/agents/${encodeURIComponent(state.agent.id)}/sessions/${encodeURIComponent(state.session.key)}/messages`, {
+    const response = await fetch(`/api/agents/${encodeURIComponent(agentID)}/sessions/${encodeURIComponent(sessionKey)}/messages/stream`, {
       method: "POST",
       body: JSON.stringify({ text }),
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
     });
-    state.session = result.session;
-    await refreshSessions();
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `请求失败（${response.status}）`);
+    }
+    await readSSE(response, (streamEvent) => {
+      if (streamEvent.type === "final") finalReceived = true;
+      handleChatStreamEvent(streamEvent);
+    });
+    if (!finalReceived) throw new Error("流式响应提前结束");
   } catch (error) {
-    state.session.messages = state.session.messages.slice(0, -1);
-    showToast(error.message, true);
+    if (error.name === "AbortError") showToast("已停止生成");
+    else showToast(error.message, true);
   } finally {
-    state.busy = false;
-    renderWorkspace();
+    try {
+      if (state.agent?.id === agentID) {
+        const latest = await api(`/api/agents/${encodeURIComponent(agentID)}/sessions/${encodeURIComponent(sessionKey)}`);
+        if (state.session?.key === sessionKey) state.session = latest;
+        await refreshSessions();
+      }
+    } catch (error) {
+      showToast(error.message, true);
+    }
+    if (state.streamAbort === controller) {
+      state.streamAbort = null;
+      state.busy = false;
+    }
+    if (state.agent?.id === agentID && state.session?.key === sessionKey && !location.hash.endsWith("/settings")) {
+      renderWorkspace();
+    }
   }
+}
+
+function stopCurrentStream() {
+  state.streamAbort?.abort();
+}
+
+function abortActiveStream() {
+  if (state.streamAbort && !state.streamAbort.signal.aborted) state.streamAbort.abort();
+}
+
+async function readSSE(response, onEvent) {
+  if (!response.body) throw new Error("浏览器不支持流式响应");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      let separator = buffer.match(/\r?\n\r?\n/);
+      while (separator) {
+        const frame = buffer.slice(0, separator.index);
+        buffer = buffer.slice(separator.index + separator[0].length);
+        const data = frame
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (data && data !== "[DONE]") onEvent(JSON.parse(data));
+        separator = buffer.match(/\r?\n\r?\n/);
+      }
+      if (done) break;
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function handleChatStreamEvent(streamEvent) {
+  const data = streamEvent.data || {};
+  switch (streamEvent.type) {
+    case "token_delta":
+      removeThinkingRow();
+      appendAssistantDelta(data.delta || "");
+      break;
+    case "tool_start":
+      removeThinkingRow();
+      showToolStart(data);
+      break;
+    case "tool_result":
+      showToolResult(data);
+      break;
+    case "final":
+      removeThinkingRow();
+      if (!document.querySelector("[data-stream-assistant]") && data.content) appendAssistantDelta(data.content);
+      break;
+    case "error":
+      throw new Error(data.message || "消息处理失败");
+  }
+  scrollChatToBottom();
+}
+
+function removeThinkingRow() {
+  document.querySelector(".thinking-row")?.remove();
+}
+
+function appendAssistantDelta(delta) {
+  if (!delta) return;
+  let row = document.querySelector("[data-stream-assistant]");
+  if (!row) {
+    row = document.createElement("article");
+    row.className = "message-row assistant";
+    row.dataset.streamAssistant = "true";
+    const avatar = document.createElement("div");
+    avatar.className = "message-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+    avatar.textContent = [...(state.agent?.name || "AI")].slice(0, 2).join("").toUpperCase();
+    const content = document.createElement("div");
+    content.className = "message-content";
+    const heading = document.createElement("div");
+    heading.className = "message-heading";
+    const name = document.createElement("strong");
+    name.textContent = state.agent?.name || "Agent";
+    const time = document.createElement("time");
+    time.textContent = "刚刚";
+    heading.append(name, time);
+    const bubble = document.createElement("div");
+    bubble.className = "message-bubble";
+    bubble.dataset.streamText = "true";
+    content.append(heading, bubble);
+    row.append(avatar, content);
+    appendStreamNode(row);
+  }
+  const bubble = row.querySelector("[data-stream-text]");
+  if (bubble) bubble.textContent += delta;
+}
+
+function showToolStart(data) {
+  const details = document.createElement("details");
+  details.className = "tool-message running";
+  details.dataset.toolCallId = data.tool_call_id || "";
+  details.open = true;
+  const summary = document.createElement("summary");
+  summary.textContent = `工具执行 · ${data.tool_name || "运行中"} · 执行中`;
+  const result = document.createElement("pre");
+  result.textContent = data.arguments || "等待工具参数";
+  details.append(summary, result);
+  appendStreamNode(details);
+}
+
+function showToolResult(data) {
+  const details = [...document.querySelectorAll(".tool-message[data-tool-call-id]")]
+    .find((item) => item.dataset.toolCallId === (data.tool_call_id || ""));
+  if (!details) return;
+  details.classList.remove("running");
+  details.classList.add(data.success ? "succeeded" : "failed");
+  details.querySelector("summary").textContent = `工具执行 · ${data.tool_name || "运行结果"} · ${data.success ? "已完成" : "失败"}`;
+  details.querySelector("pre").textContent = data.result || "";
+}
+
+function appendStreamNode(node) {
+  const list = document.querySelector(".message-list");
+  if (!list) return;
+  const thinking = list.querySelector(".thinking-row");
+  list.insertBefore(node, thinking);
+}
+
+function scrollChatToBottom() {
+  const scroll = document.querySelector(".message-scroll");
+  if (scroll) scroll.scrollTop = scroll.scrollHeight;
 }
 
 async function updateModel(event) {
@@ -613,7 +784,11 @@ document.querySelector("#copy-config")?.addEventListener("click", async () => {
   }
 });
 
-window.addEventListener("hashchange", route);
+window.addEventListener("hashchange", () => {
+  abortActiveStream();
+  route();
+});
+window.addEventListener("pagehide", abortActiveStream);
 window.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k" && state.agent) {
     event.preventDefault();

@@ -1044,6 +1044,18 @@ svg {
   white-space: pre-wrap;
 }
 
+.tool-message.running {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--line));
+}
+
+.tool-message.succeeded {
+  border-color: color-mix(in srgb, var(--success) 42%, var(--line));
+}
+
+.tool-message.failed {
+  border-color: color-mix(in srgb, var(--danger) 46%, var(--line));
+}
+
 .thinking-row {
   display: flex;
   margin: 0 0 36px 52px;
@@ -1133,6 +1145,14 @@ svg {
 .send-button:hover {
   background: var(--accent-strong);
   transform: translateY(-1px);
+}
+
+.send-button.stop {
+  background: var(--danger);
+}
+
+.send-button.stop:hover {
+  background: color-mix(in srgb, var(--danger) 82%, var(--ink));
 }
 
 .send-button:disabled {
