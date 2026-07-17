@@ -15,6 +15,7 @@ import (
 	"github.com/lucky798213/luckyclaw/internal/channels"
 	"github.com/lucky798213/luckyclaw/internal/config"
 	"github.com/lucky798213/luckyclaw/internal/gateway"
+	"github.com/lucky798213/luckyclaw/internal/mcp"
 	"github.com/lucky798213/luckyclaw/internal/provider"
 	"github.com/lucky798213/luckyclaw/internal/session"
 	"github.com/lucky798213/luckyclaw/internal/skills"
@@ -47,7 +48,18 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	agents, err := buildAgents(cfg.Agents, providerManager, sessionStore, skillCatalog)
+	mcpManager, err := mcp.NewManager(context.Background(), cfg.MCP, referencedMCPServers(cfg.Agents))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := mcpManager.Close(closeCtx); err != nil {
+			log.Printf("关闭 MCP 服务失败: %v", err)
+		}
+	}()
+	agents, err := buildAgents(cfg.Agents, providerManager, sessionStore, skillCatalog, mcpManager)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -134,6 +146,7 @@ func buildAgents(
 	providers *provider.Manager,
 	sessionStore session.Store,
 	skillCatalog *skills.Catalog,
+	mcpManager *mcp.Manager,
 ) (map[string]*agent.Agent, error) {
 	ids := make([]string, 0, len(configs))
 	for id := range configs {
@@ -144,7 +157,7 @@ func buildAgents(
 	agents := make(map[string]*agent.Agent, len(configs))
 	for _, id := range ids {
 		agentCfg := configs[id]
-		var statefulTools []tools.Tool
+		var additionalTools []tools.Tool
 		selectedSkills, err := skillCatalog.Select(agentCfg.Skills)
 		if err != nil {
 			return nil, fmt.Errorf("选择 Agent %q Skills: %w", id, err)
@@ -154,16 +167,21 @@ func buildAgents(
 			if err != nil {
 				return nil, fmt.Errorf("创建 Agent %q Skill 工具: %w", id, err)
 			}
-			statefulTools = append(statefulTools, loadSkill)
+			additionalTools = append(additionalTools, loadSkill)
 		}
+		mcpTools, err := mcpManager.ToolsFor(agentCfg.MCPServers)
+		if err != nil {
+			return nil, fmt.Errorf("创建 Agent %q MCP 工具: %w", id, err)
+		}
+		additionalTools = append(additionalTools, mcpTools...)
 		if sessionStore != nil {
 			memorySearch, err := tools.NewMemorySearchTool(sessionStore, id)
 			if err != nil {
 				return nil, fmt.Errorf("创建 Agent %q 长期记忆工具: %w", id, err)
 			}
-			statefulTools = append(statefulTools, memorySearch)
+			additionalTools = append(additionalTools, memorySearch)
 		}
-		toolRegistry, err := tools.NewDefaultRegistry(statefulTools...)
+		toolRegistry, err := tools.NewDefaultRegistry(additionalTools...)
 		if err != nil {
 			return nil, fmt.Errorf("创建 Agent %q 工具注册表: %w", id, err)
 		}
@@ -188,4 +206,19 @@ func buildAgents(
 		agents[id] = current
 	}
 	return agents, nil
+}
+
+func referencedMCPServers(configs map[string]config.AgentConfig) []string {
+	seen := make(map[string]struct{})
+	for _, agentCfg := range configs {
+		for _, name := range agentCfg.MCPServers {
+			seen[name] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for name := range seen {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result
 }

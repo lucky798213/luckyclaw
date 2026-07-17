@@ -12,6 +12,7 @@ import (
 
 	"github.com/lucky798213/luckyclaw/internal/bus"
 	"github.com/lucky798213/luckyclaw/internal/config"
+	"github.com/lucky798213/luckyclaw/internal/mcp"
 	"github.com/lucky798213/luckyclaw/internal/provider"
 	"github.com/lucky798213/luckyclaw/internal/session"
 	"github.com/lucky798213/luckyclaw/internal/skills"
@@ -126,7 +127,7 @@ func TestBuildAgentsWiresDefaultTools(t *testing.T) {
 			MaxToolIterations:  4,
 			ToolTimeoutSeconds: 2,
 		},
-	}, providers, store, mustEmptySkillCatalog(t))
+	}, providers, store, mustEmptySkillCatalog(t), mustEmptyMCPManager(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,6 +149,18 @@ func TestBuildAgentsWiresDefaultTools(t *testing.T) {
 	if !reflect.DeepEqual(names, []string{"calculator", "current_time", "http_fetch", "memory_search"}) {
 		t.Fatalf("tools = %v", names)
 	}
+}
+
+func mustEmptyMCPManager(t *testing.T) *mcp.Manager {
+	t.Helper()
+	manager, err := mcp.NewManager(context.Background(), config.MCPConfig{
+		RequestTimeoutSeconds: 30,
+		MaxResultBytes:        1 << 20,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manager
 }
 
 func mustEmptySkillCatalog(t *testing.T) *skills.Catalog {

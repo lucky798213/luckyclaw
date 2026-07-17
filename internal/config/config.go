@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -37,6 +38,7 @@ type Config struct {
 	DefaultAgent string                    `yaml:"default_agent"`
 	Bindings     []BindingConfig           `yaml:"bindings"`
 	Skills       SkillsConfig              `yaml:"skills,omitempty"`
+	MCP          MCPConfig                 `yaml:"mcp,omitempty"`
 	TaskQueue    TaskQueueConfig           `yaml:"task_queue,omitempty"`
 	Storage      StorageConfig             `yaml:"storage,omitempty"`
 	Web          WebConfig                 `yaml:"web,omitempty"`
@@ -45,6 +47,26 @@ type Config struct {
 // SkillsConfig 保存 SKILL.md 的顶层发现目录。
 type SkillsConfig struct {
 	Directories []string `yaml:"directories,omitempty"`
+}
+
+// MCPConfig 保存 stdio MCP 服务及响应限制。
+type MCPConfig struct {
+	RequestTimeoutSeconds int                        `yaml:"request_timeout_seconds,omitempty"`
+	MaxResultBytes        int                        `yaml:"max_result_bytes,omitempty"`
+	Servers               map[string]MCPServerConfig `yaml:"servers,omitempty"`
+}
+
+// RequestTimeout 返回 MCP 请求超时。
+func (c MCPConfig) RequestTimeout() time.Duration {
+	return time.Duration(c.RequestTimeoutSeconds) * time.Second
+}
+
+// MCPServerConfig 保存一个 MCP stdio 子进程配置。
+type MCPServerConfig struct {
+	Transport string            `yaml:"transport"`
+	Command   string            `yaml:"command"`
+	Args      []string          `yaml:"args,omitempty"`
+	Env       map[string]string `yaml:"env,omitempty"`
 }
 
 // WebConfig 保存网页工作台的监听配置。
@@ -117,6 +139,7 @@ type AgentConfig struct {
 	DefaultModel              string   `yaml:"default_model"`
 	Models                    []string `yaml:"models"`
 	Skills                    []string `yaml:"skills,omitempty"`
+	MCPServers                []string `yaml:"mcp_servers,omitempty"`
 	MaxToolIterations         int      `yaml:"max_tool_iterations,omitempty"`
 	ToolTimeoutSeconds        int      `yaml:"tool_timeout_seconds,omitempty"`
 	ContextWindowTokens       int      `yaml:"context_window_tokens,omitempty"`
@@ -177,6 +200,12 @@ func LoadFile(path string) (*Config, error) {
 	cfg.TaskQueue = cfg.TaskQueue.WithDefaults()
 	cfg.Storage = cfg.Storage.WithDefaults()
 	cfg.Web = cfg.Web.WithDefaults()
+	if cfg.MCP.RequestTimeoutSeconds == 0 {
+		cfg.MCP.RequestTimeoutSeconds = 30
+	}
+	if cfg.MCP.MaxResultBytes == 0 {
+		cfg.MCP.MaxResultBytes = 1 << 20
+	}
 	for agentID, agentCfg := range cfg.Agents {
 		cfg.Agents[agentID] = agentCfg.WithDefaults()
 	}
@@ -234,6 +263,29 @@ func validate(cfg *Config) error {
 		}
 		seenSkillDirectories[directory] = struct{}{}
 		cfg.Skills.Directories[index] = directory
+	}
+	if cfg.MCP.RequestTimeoutSeconds <= 0 {
+		return fmt.Errorf("mcp.request_timeout_seconds must be greater than zero")
+	}
+	if cfg.MCP.MaxResultBytes <= 0 {
+		return fmt.Errorf("mcp.max_result_bytes must be greater than zero")
+	}
+	for _, name := range sortedKeys(cfg.MCP.Servers) {
+		server := cfg.MCP.Servers[name]
+		if strings.TrimSpace(name) == "" || name != strings.TrimSpace(name) {
+			return fmt.Errorf("MCP server name cannot be empty or contain surrounding whitespace")
+		}
+		if server.Transport != "stdio" {
+			return fmt.Errorf("MCP server %q transport must be stdio", name)
+		}
+		if strings.TrimSpace(server.Command) == "" {
+			return fmt.Errorf("MCP server %q command is required", name)
+		}
+		for key := range server.Env {
+			if strings.TrimSpace(key) == "" || strings.Contains(key, "=") {
+				return fmt.Errorf("MCP server %q has invalid environment name %q", name, key)
+			}
+		}
 	}
 
 	if len(cfg.Providers) == 0 {
@@ -316,6 +368,17 @@ func validate(cfg *Config) error {
 				return fmt.Errorf("agent %q skill %q is duplicated", agentID, name)
 			}
 			seenSkills[name] = struct{}{}
+		}
+		seenMCPServers := make(map[string]struct{}, len(agentCfg.MCPServers))
+		for _, rawName := range agentCfg.MCPServers {
+			name := strings.TrimSpace(rawName)
+			if _, exists := cfg.MCP.Servers[name]; !exists {
+				return fmt.Errorf("agent %q references unknown MCP server %q", agentID, name)
+			}
+			if _, duplicate := seenMCPServers[name]; duplicate {
+				return fmt.Errorf("agent %q MCP server %q is duplicated", agentID, name)
+			}
+			seenMCPServers[name] = struct{}{}
 		}
 		allowed := make(map[string]struct{}, len(agentCfg.Models))
 		for _, raw := range agentCfg.Models {

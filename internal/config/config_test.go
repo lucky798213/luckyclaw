@@ -235,6 +235,32 @@ skills:
 	}
 }
 
+func TestLoadFileLoadsMCPConfiguration(t *testing.T) {
+	content := strings.Replace(validConfigYAML, "default_agent: lucky", `default_agent: lucky
+mcp:
+  request_timeout_seconds: 12
+  max_result_bytes: 2048
+  servers:
+    echo:
+      transport: stdio
+      command: echo-server
+      args: [--stdio]
+      env:
+        TOKEN: $MCP_TOKEN`, 1)
+	content = strings.Replace(content, "    name: LuckyClaw", `    name: LuckyClaw
+    mcp_servers: [echo]`, 1)
+	cfg, err := LoadFile(writeConfig(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCP.RequestTimeoutSeconds != 12 || cfg.MCP.MaxResultBytes != 2048 || cfg.MCP.Servers["echo"].Command != "echo-server" {
+		t.Fatalf("MCP config = %+v", cfg.MCP)
+	}
+	if got := cfg.Agents["lucky"].MCPServers; len(got) != 1 || got[0] != "echo" {
+		t.Fatalf("agent MCP servers = %v", got)
+	}
+}
+
 func TestLoadFileLoadsThreadBinding(t *testing.T) {
 	content := validConfigYAML + `
   - channel: feishu
