@@ -3,6 +3,8 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -191,8 +193,65 @@ func (d *DockerExecutor) waitUntilRunning(ctx context.Context) error {
 	}
 }
 
-func (d *DockerExecutor) Exec(context.Context, string, time.Duration) (ExecResult, error) {
-	return ExecResult{}, fmt.Errorf("Docker exec is not implemented")
+func (d *DockerExecutor) Exec(ctx context.Context, command string, timeout time.Duration) (ExecResult, error) {
+	if strings.TrimSpace(command) == "" {
+		return ExecResult{}, fmt.Errorf("sandbox command cannot be empty")
+	}
+	if timeout <= 0 {
+		return ExecResult{}, fmt.Errorf("sandbox command timeout must be greater than zero")
+	}
+	execCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	marker := "/tmp/luckyclaw-pgid-" + randomMarker()
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-execCtx.Done():
+			d.killExecProcess(marker)
+		case <-done:
+		}
+	}()
+	output, truncated, err := runDocker(execCtx, nil, d.policy.MaxOutputBytes, buildDockerExecArgs(d.containerID, marker, command)...)
+	close(done)
+	result := ExecResult{Output: output, ExitCode: exitCode(err), Truncated: truncated}
+	if execCtx.Err() != nil {
+		d.killExecProcess(marker)
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		return result, fmt.Errorf("sandbox command timed out after %s", timeout)
+	}
+	d.cleanupExecMarker(marker)
+	if err != nil {
+		return result, fmt.Errorf("sandbox command exited with code %d: %s", result.ExitCode, strings.TrimSpace(result.Output))
+	}
+	return result, nil
+}
+
+func buildDockerExecArgs(containerID, marker, command string) []string {
+	const script = `echo $$ > "$1"; exec sh -lc "$2"`
+	return []string{"exec", containerID, "setsid", "sh", "-c", script, "sh", marker, command}
+}
+
+func (d *DockerExecutor) killExecProcess(marker string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	const script = `pgid=$(cat "$1" 2>/dev/null); if [ -n "$pgid" ]; then kill -KILL -- "-$pgid" 2>/dev/null || true; fi; rm -f -- "$1"`
+	_, _, _ = runDocker(ctx, nil, 64<<10, "exec", d.containerID, "sh", "-c", script, "sh", marker)
+}
+
+func (d *DockerExecutor) cleanupExecMarker(marker string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _, _ = runDocker(ctx, nil, 64<<10, "exec", d.containerID, "rm", "-f", "--", marker)
+}
+
+func randomMarker() string {
+	var value [8]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(value[:])
 }
 
 func (d *DockerExecutor) ReadFile(context.Context, string) ([]byte, error) {

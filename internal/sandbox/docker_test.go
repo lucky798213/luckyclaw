@@ -31,3 +31,14 @@ func TestLimitedBufferTruncatesWithoutBlockingWriter(t *testing.T) {
 		t.Fatalf("limited buffer = %d, %v, %q, %v", written, err, buffer.buffer.String(), buffer.truncated)
 	}
 }
+
+func TestBuildDockerExecArgsKeepsCommandOutOfHostShell(t *testing.T) {
+	command := `echo "$(touch /tmp/host-must-not-run)" && printf '%s' "$HOME"`
+	arguments := buildDockerExecArgs("container", "/tmp/marker", command)
+	if arguments[len(arguments)-1] != command || arguments[0] != "exec" || arguments[1] != "container" {
+		t.Fatalf("exec arguments = %#v", arguments)
+	}
+	if strings.Contains(arguments[5], command) {
+		t.Fatal("command was interpolated into the shell script")
+	}
+}
