@@ -19,6 +19,11 @@ agents:
     # 单次请求最多允许 20 轮工具调用；单个工具最多执行 30 秒。
     max_tool_iterations: 20
     tool_timeout_seconds: 30
+    # 按模型窗口提前压缩旧消息；一个 Agent 有多个模型时请使用最小窗口。
+    context_window_tokens: 128000
+    compaction_threshold_tokens: 80000
+    # 优先保留最近 20 条消息；硬窗口不足时会缩减到最近的完整对话轮次。
+    compaction_recent_messages: 20
 
 default_agent: lucky
 
