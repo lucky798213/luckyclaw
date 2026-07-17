@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"sort"
@@ -225,8 +226,12 @@ func (a *Agent) handleModelCommand(ctx context.Context, address bus.Conversation
 	return fmt.Sprintf("当前会话模型已切换为: %s", modelRef)
 }
 
-// handleMessage 循环执行模型和工具，并在每个完整阶段成功后保存上下文。
+// handleMessage 循环执行模型和工具，并在整轮成功后保存上下文。
 func (a *Agent) handleMessage(ctx context.Context, msg bus.InboundMessage) (*provider.Message, error) {
+	return a.handleMessageWithEvents(ctx, msg, nil)
+}
+
+func (a *Agent) handleMessageWithEvents(ctx context.Context, msg bus.InboundMessage, events chan<- Event) (*provider.Message, error) {
 	// 1. 每次处理消息时重新读取 Soul，使运行期间修改的角色设定可以立即生效。
 	soul, err := a.ReadSoul()
 	if err != nil {
@@ -270,20 +275,21 @@ func (a *Agent) handleMessage(ctx context.Context, msg bus.InboundMessage) (*pro
 	// toolCallCounts 用于识别同名同参数的重复调用；failedRounds 用于连续失败降级。
 	toolDefinitions := a.tools.Definitions()
 	toolCallCounts := make(map[toolCallSignature]int)
-	// userPersisted 标记用户消息是否已经随某个完整阶段写入会话，防止重复保存。
-	userPersisted := false
+	// 本轮消息先暂存在内存中，只有产生最终答复后才会作为一个批次写入会话。
+	pendingMessages := []provider.Message{userMessage}
 	failedRounds := 0
 
 	// 6. ReAct 工具循环：模型决定是否调用工具，工具结果再反馈给模型继续推理。
 	for iteration := 0; iteration < a.maxToolIterations; iteration++ {
 		// 正常模型调用始终携带完整工具定义，让模型可以选择直接回答或发起 ToolCalls。
-		assistantMessage, err := resolved.Provider.Chat(
+		assistantMessage, err := a.callModel(
 			ctx,
+			resolved,
 			messages,
 			toolDefinitions,
-			resolved.ModelID,
 			a.maxTokens,
 			a.temperature,
+			events,
 		)
 		if err != nil {
 			return nil, err
@@ -300,10 +306,9 @@ func (a *Agent) handleMessage(ctx context.Context, msg bus.InboundMessage) (*pro
 		if len(assistant.ToolCalls) == 0 {
 			// 空文本不能作为有效终点，因此禁用工具再请求模型做一次最终归纳。
 			if strings.TrimSpace(assistant.Content) == "" {
-				return a.synthesizeFinal(ctx, resolved, currentSession, messages, userMessage, userPersisted, "模型返回了空响应")
+				return a.synthesizeFinal(ctx, resolved, currentSession, messages, pendingMessages, "模型返回了空响应", events, a.maxTokens, a.temperature)
 			}
-			// 首轮直接回答时一并保存 user + assistant；经过工具轮后只需追加最终 assistant。
-			if err := appendFinalMessage(ctx, currentSession, userMessage, userPersisted, assistant); err != nil {
+			if err := appendFinalMessage(ctx, currentSession, pendingMessages, assistant); err != nil {
 				return nil, err
 			}
 			return &assistant, nil
@@ -316,6 +321,16 @@ func (a *Agent) handleMessage(ctx context.Context, msg bus.InboundMessage) (*pro
 		roundAllFailed := true
 		repeatedCallDetected := false
 		for _, call := range assistant.ToolCalls {
+			if !emitOptionalEvent(ctx, events, Event{
+				Type: EventToolStart,
+				Data: EventData{
+					ToolCallID: call.ID,
+					ToolName:   call.Function.Name,
+					Arguments:  call.Function.Arguments,
+				},
+			}) {
+				return nil, ctx.Err()
+			}
 			// 对工具名和规范化后的 JSON 参数生成签名，参数字段顺序不同也会视为同一次调用。
 			signature := makeToolCallSignature(call)
 			toolCallCounts[signature]++
@@ -329,7 +344,11 @@ func (a *Agent) handleMessage(ctx context.Context, msg bus.InboundMessage) (*pro
 				// 每个工具都由 executeToolCall 添加独立超时，单个慢工具不会拖死整个循环。
 				result, executeErr = a.executeToolCall(ctx, call)
 			}
+			if ctx.Err() != nil || errors.Is(executeErr, context.Canceled) {
+				return nil, ctx.Err()
+			}
 			// 工具错误不会直接终止 Agent，而是转换为模型可读的 tool result，让模型调整策略。
+			success := executeErr == nil
 			if executeErr != nil {
 				result = formatToolError(executeErr)
 			} else {
@@ -342,28 +361,28 @@ func (a *Agent) handleMessage(ctx context.Context, msg bus.InboundMessage) (*pro
 				ToolCallID: call.ID,
 				Name:       call.Function.Name,
 			})
+			if !emitOptionalEvent(ctx, events, Event{
+				Type: EventToolResult,
+				Data: EventData{
+					ToolCallID: call.ID,
+					ToolName:   call.Function.Name,
+					Result:     result,
+					Success:    boolPointer(success),
+				},
+			}) {
+				return nil, ctx.Err()
+			}
 		}
 
-		// 8. 将 assistant tool call 和本轮全部 tool result 作为一个批次原子保存。
-		// 这样即使进程重启，也不会留下只有调用、没有结果的孤立 ToolCall。
-		batch := make([]provider.Message, 0, len(toolMessages)+2)
-		if !userPersisted {
-			batch = append(batch, userMessage)
-		}
-		batch = append(batch, assistant)
-		batch = append(batch, toolMessages...)
-		if err := currentSession.Append(ctx, batch...); err != nil {
-			return nil, fmt.Errorf("save tool round: %w", err)
-		}
-		userPersisted = true
-
-		// 持久化成功后再更新本轮内存上下文，保证内存状态不会领先于 SQLite。
+		// 8. 将完整工具轮加入本轮暂存和模型上下文，不提前写入持久化会话。
+		pendingMessages = append(pendingMessages, assistant)
+		pendingMessages = append(pendingMessages, toolMessages...)
 		messages = append(messages, assistant)
 		messages = append(messages, toolMessages...)
 
 		// 重复调用达到阈值后立即禁用工具，要求模型基于已有结果生成最终答复。
 		if repeatedCallDetected {
-			return a.synthesizeFinal(ctx, resolved, currentSession, messages, userMessage, userPersisted, "检测到重复工具调用")
+			return a.synthesizeFinal(ctx, resolved, currentSession, messages, pendingMessages, "检测到重复工具调用", events, a.maxTokens, a.temperature)
 		}
 
 		// 只有整轮工具全部失败才累计失败轮数；任一成功结果都会将计数清零。
@@ -374,12 +393,49 @@ func (a *Agent) handleMessage(ctx context.Context, msg bus.InboundMessage) (*pro
 		}
 		// 连续三轮全部失败时停止继续试工具，避免在不可用服务或错误参数上反复消耗。
 		if failedRounds >= failedToolRoundLimit {
-			return a.synthesizeFinal(ctx, resolved, currentSession, messages, userMessage, userPersisted, "连续三轮工具调用全部失败")
+			return a.synthesizeFinal(ctx, resolved, currentSession, messages, pendingMessages, "连续三轮工具调用全部失败", events, a.maxTokens, a.temperature)
 		}
 	}
 
 	// 9. 用完最大迭代次数仍没有最终文本时，再进行一次不携带工具的强制归纳调用。
-	return a.synthesizeFinal(ctx, resolved, currentSession, messages, userMessage, userPersisted, fmt.Sprintf("已达到 %d 次工具迭代上限", a.maxToolIterations))
+	return a.synthesizeFinal(ctx, resolved, currentSession, messages, pendingMessages, fmt.Sprintf("已达到 %d 次工具迭代上限", a.maxToolIterations), events, a.maxTokens, a.temperature)
+}
+
+func (a *Agent) callModel(
+	ctx context.Context,
+	resolved provider.ResolvedModel,
+	messages []provider.Message,
+	toolDefinitions []provider.Tool,
+	maxTokens int,
+	temperature float64,
+	events chan<- Event,
+) (*provider.Message, error) {
+	if events == nil {
+		return resolved.Provider.Chat(ctx, messages, toolDefinitions, resolved.ModelID, maxTokens, temperature)
+	}
+	stream, err := resolved.Provider.ChatStream(ctx, messages, toolDefinitions, resolved.ModelID, maxTokens, temperature)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+	for {
+		chunk, nextErr := stream.Next()
+		if nextErr != nil {
+			if errors.Is(nextErr, io.EOF) {
+				return nil, fmt.Errorf("provider stream ended before final message")
+			}
+			return nil, nextErr
+		}
+		if chunk.Delta != "" && !emitEvent(ctx, events, Event{Type: EventTokenDelta, Data: EventData{Delta: chunk.Delta}}) {
+			return nil, ctx.Err()
+		}
+		if chunk.Done {
+			if chunk.Message == nil {
+				return nil, fmt.Errorf("provider stream returned a nil final message")
+			}
+			return chunk.Message, nil
+		}
+	}
 }
 
 type toolCallSignature struct {
@@ -461,14 +517,12 @@ func formatToolError(err error) string {
 func appendFinalMessage(
 	ctx context.Context,
 	currentSession *session.Session,
-	userMessage provider.Message,
-	userPersisted bool,
+	pendingMessages []provider.Message,
 	assistant provider.Message,
 ) error {
-	batch := []provider.Message{assistant}
-	if !userPersisted {
-		batch = append([]provider.Message{userMessage}, batch...)
-	}
+	batch := make([]provider.Message, 0, len(pendingMessages)+1)
+	batch = append(batch, pendingMessages...)
+	batch = append(batch, assistant)
 	if err := currentSession.Append(ctx, batch...); err != nil {
 		return fmt.Errorf("save session messages: %w", err)
 	}
@@ -480,9 +534,11 @@ func (a *Agent) synthesizeFinal(
 	resolved provider.ResolvedModel,
 	currentSession *session.Session,
 	messages []provider.Message,
-	userMessage provider.Message,
-	userPersisted bool,
+	pendingMessages []provider.Message,
 	reason string,
+	events chan<- Event,
+	maxTokens int,
+	temperature float64,
 ) (*provider.Message, error) {
 	finalMessages := append([]provider.Message(nil), messages...)
 	finalMessages = append(finalMessages, provider.Message{
@@ -492,14 +548,18 @@ func (a *Agent) synthesizeFinal(
 			reason,
 		),
 	})
-	response, err := resolved.Provider.Chat(
+	response, err := a.callModel(
 		ctx,
+		resolved,
 		finalMessages,
 		nil,
-		resolved.ModelID,
-		a.maxTokens,
-		a.temperature,
+		maxTokens,
+		temperature,
+		events,
 	)
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return nil, ctx.Err()
+	}
 	assistant := provider.Message{Role: "assistant"}
 	if err == nil && response != nil && len(response.ToolCalls) == 0 && strings.TrimSpace(response.Content) != "" {
 		assistant = *response
@@ -510,7 +570,7 @@ func (a *Agent) synthesizeFinal(
 		}
 		assistant.Content = fmt.Sprintf("工具调用未能完成（%s），暂时无法生成可靠结果，请稍后重试。", reason)
 	}
-	if err := appendFinalMessage(ctx, currentSession, userMessage, userPersisted, assistant); err != nil {
+	if err := appendFinalMessage(ctx, currentSession, pendingMessages, assistant); err != nil {
 		return nil, err
 	}
 	return &assistant, nil

@@ -29,13 +29,18 @@ type fakeProvider struct {
 }
 
 type singleMessageStream struct {
-	message *provider.Message
-	done    bool
+	message   *provider.Message
+	deltaSent bool
+	done      bool
 }
 
 func (s *singleMessageStream) Next() (provider.StreamChunk, error) {
 	if s.done {
 		return provider.StreamChunk{}, io.EOF
+	}
+	if !s.deltaSent && s.message != nil && s.message.Content != "" {
+		s.deltaSent = true
+		return provider.StreamChunk{Delta: s.message.Content}, nil
 	}
 	s.done = true
 	return provider.StreamChunk{Message: s.message, Done: true}, nil
@@ -192,6 +197,13 @@ func TestHandleMessageStreamEmitsFinalEvent(t *testing.T) {
 
 	events := a.HandleMessageStream(context.Background(), inbound("chat-stream", "hello"))
 	event, ok := <-events
+	if !ok {
+		t.Fatal("event stream closed before token event")
+	}
+	if event.Type != EventTokenDelta || event.Data.Delta != "stream reply" {
+		t.Fatalf("event = %+v", event)
+	}
+	event, ok = <-events
 	if !ok {
 		t.Fatal("event stream closed before final event")
 	}

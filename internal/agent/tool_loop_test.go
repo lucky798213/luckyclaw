@@ -253,6 +253,85 @@ func TestToolCallingLoopExecutesMultipleCallsInOrder(t *testing.T) {
 	}
 }
 
+func TestHandleMessageStreamEmitsToolLifecycleInOrder(t *testing.T) {
+	registry := newScriptedRegistry(t, &scriptedTool{name: "lookup", execute: func(_ context.Context, _ json.RawMessage) (string, error) {
+		return "找到结果", nil
+	}})
+	currentProvider := &scriptedProvider{steps: []scriptedProviderStep{
+		{message: provider.Message{ToolCalls: []provider.ToolCall{toolCall("call-lookup", "lookup", `{"query":"LuckyClaw"}`)}}},
+		{message: provider.Message{Content: "这是最终回答。"}},
+	}}
+	currentAgent := newToolLoopAgent(t, currentProvider, registry, nil, 3, time.Second)
+
+	events := collectEvents(currentAgent.HandleMessageStream(context.Background(), inbound("stream-tools", "查询")))
+	if len(events) != 4 {
+		t.Fatalf("events = %#v", events)
+	}
+	if events[0].Type != EventToolStart || events[0].Data.ToolCallID != "call-lookup" || events[0].Data.ToolName != "lookup" {
+		t.Fatalf("tool_start = %#v", events[0])
+	}
+	if events[1].Type != EventToolResult || events[1].Data.Result != "找到结果" || events[1].Data.Success == nil || !*events[1].Data.Success {
+		t.Fatalf("tool_result = %#v", events[1])
+	}
+	if events[2].Type != EventTokenDelta || events[2].Data.Delta != "这是最终回答。" {
+		t.Fatalf("token_delta = %#v", events[2])
+	}
+	if events[3].Type != EventFinal || events[3].Data.Content != "这是最终回答。" {
+		t.Fatalf("final = %#v", events[3])
+	}
+}
+
+func TestHandleMessageStreamCancellationDiscardsWholeTurn(t *testing.T) {
+	store, err := session.OpenSQLite(filepath.Join(t.TempDir(), "sessions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	toolStopped := make(chan struct{})
+	registry := newScriptedRegistry(t, &scriptedTool{name: "wait", execute: func(ctx context.Context, _ json.RawMessage) (string, error) {
+		<-ctx.Done()
+		close(toolStopped)
+		return "", ctx.Err()
+	}})
+	currentProvider := &scriptedProvider{steps: []scriptedProviderStep{
+		{message: provider.Message{ToolCalls: []provider.ToolCall{toolCall("call-wait", "wait", `{}`)}}},
+	}}
+	currentAgent := newToolLoopAgent(t, currentProvider, registry, store, 3, time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	events := currentAgent.HandleMessageStream(ctx, inbound("cancel-tools", "等待"))
+
+	first, ok := <-events
+	if !ok || first.Type != EventToolStart {
+		t.Fatalf("first event = %#v, open = %v", first, ok)
+	}
+	cancel()
+	select {
+	case <-toolStopped:
+	case <-time.After(time.Second):
+		t.Fatal("工具没有收到取消信号")
+	}
+	for event := range events {
+		if event.Type == EventFinal || event.Type == EventError {
+			t.Fatalf("取消后不应发送事件: %#v", event)
+		}
+	}
+	current, err := currentAgent.sessionsManager.CurrentSession(context.Background(), inbound("cancel-tools", "").Address())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if messages := current.Messages(); len(messages) != 0 {
+		t.Fatalf("取消后保存了消息: %#v", messages)
+	}
+}
+
+func collectEvents(events <-chan Event) []Event {
+	var collected []Event
+	for event := range events {
+		collected = append(collected, event)
+	}
+	return collected
+}
+
 func TestToolCallingLoopConvertsTimeoutToToolResult(t *testing.T) {
 	release := make(chan struct{})
 	registry := newScriptedRegistry(t, &scriptedTool{name: "wait", execute: func(_ context.Context, _ json.RawMessage) (string, error) {

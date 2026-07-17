@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"log"
+	"strings"
 
 	"github.com/lucky798213/luckyclaw/internal/bus"
 )
@@ -40,13 +43,49 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	events := make(chan Event, 32)
 	go func() {
 		defer close(events)
-		reply := a.HandleMessage(ctx, msg)
-		if ctx.Err() != nil {
+		trimmed := strings.TrimSpace(msg.Text)
+		if trimmed == "/new" || isModelCommand(trimmed) {
+			reply := a.HandleMessage(ctx, msg)
+			if ctx.Err() == nil {
+				emitEvent(ctx, events, Event{Type: EventFinal, Data: EventData{Content: reply}})
+			}
 			return
 		}
-		emitEvent(ctx, events, Event{Type: EventFinal, Data: EventData{Content: reply}})
+
+		reply, err := a.handleMessageWithEvents(ctx, msg, events)
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+			return
+		}
+		if err != nil {
+			message := handleMessageErrorReply
+			var visible *userVisibleError
+			if errors.As(err, &visible) {
+				message = visible.Error()
+			} else {
+				log.Printf("Agent %s 流式处理消息失败: %v", a.id, err)
+			}
+			emitEvent(ctx, events, Event{Type: EventError, Data: EventData{Message: message}})
+			return
+		}
+		emitEvent(ctx, events, Event{Type: EventFinal, Data: EventData{Content: reply.Content}})
 	}()
 	return events
+}
+
+func isModelCommand(trimmed string) bool {
+	fields := strings.Fields(trimmed)
+	return len(fields) > 0 && fields[0] == "/model"
+}
+
+func emitOptionalEvent(ctx context.Context, events chan<- Event, event Event) bool {
+	if events == nil {
+		return true
+	}
+	return emitEvent(ctx, events, event)
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 func emitEvent(ctx context.Context, events chan<- Event, event Event) bool {
