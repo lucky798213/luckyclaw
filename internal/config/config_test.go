@@ -261,6 +261,31 @@ mcp:
 	}
 }
 
+func TestLoadFileLoadsSandboxConfiguration(t *testing.T) {
+	content := strings.Replace(validConfigYAML, "default_agent: lucky", `default_agent: lucky
+sandbox:
+  image: test-sandbox:latest
+  workspace_root: var/workspaces
+  network_enabled: true
+  exec_timeout_seconds: 12
+  cpus: 2
+  memory_mb: 768
+  pids_limit: 64
+  tmpfs_mb: 32
+  max_output_bytes: 4096
+  max_file_bytes: 8192`, 1)
+	content = strings.Replace(content, "    name: LuckyClaw", `    name: LuckyClaw
+    sandbox_enabled: true`, 1)
+	cfg, err := LoadFile(writeConfig(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Agents["lucky"].SandboxEnabled || cfg.Sandbox.Image != "test-sandbox:latest" ||
+		cfg.Sandbox.CPUs != 2 || cfg.Sandbox.MemoryMB != 768 || !cfg.Sandbox.NetworkEnabled {
+		t.Fatalf("sandbox config = %+v, agent = %+v", cfg.Sandbox, cfg.Agents["lucky"])
+	}
+}
+
 func TestLoadFileLoadsThreadBinding(t *testing.T) {
 	content := validConfigYAML + `
   - channel: feishu

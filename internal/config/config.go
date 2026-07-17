@@ -39,6 +39,7 @@ type Config struct {
 	Bindings     []BindingConfig           `yaml:"bindings"`
 	Skills       SkillsConfig              `yaml:"skills,omitempty"`
 	MCP          MCPConfig                 `yaml:"mcp,omitempty"`
+	Sandbox      SandboxConfig             `yaml:"sandbox,omitempty"`
 	TaskQueue    TaskQueueConfig           `yaml:"task_queue,omitempty"`
 	Storage      StorageConfig             `yaml:"storage,omitempty"`
 	Web          WebConfig                 `yaml:"web,omitempty"`
@@ -67,6 +68,52 @@ type MCPServerConfig struct {
 	Command   string            `yaml:"command"`
 	Args      []string          `yaml:"args,omitempty"`
 	Env       map[string]string `yaml:"env,omitempty"`
+}
+
+// SandboxConfig 保存 Docker SandboxExecutor 的默认安全限制。
+type SandboxConfig struct {
+	Image              string  `yaml:"image,omitempty"`
+	WorkspaceRoot      string  `yaml:"workspace_root,omitempty"`
+	NetworkEnabled     bool    `yaml:"network_enabled,omitempty"`
+	ExecTimeoutSeconds int     `yaml:"exec_timeout_seconds,omitempty"`
+	CPUs               float64 `yaml:"cpus,omitempty"`
+	MemoryMB           int     `yaml:"memory_mb,omitempty"`
+	PIDsLimit          int     `yaml:"pids_limit,omitempty"`
+	TmpfsMB            int     `yaml:"tmpfs_mb,omitempty"`
+	MaxOutputBytes     int     `yaml:"max_output_bytes,omitempty"`
+	MaxFileBytes       int     `yaml:"max_file_bytes,omitempty"`
+}
+
+// WithDefaults 返回使用保守安全默认值的沙箱配置。
+func (c SandboxConfig) WithDefaults() SandboxConfig {
+	if strings.TrimSpace(c.Image) == "" {
+		c.Image = "luckyclaw-sandbox:latest"
+	}
+	if strings.TrimSpace(c.WorkspaceRoot) == "" {
+		c.WorkspaceRoot = "data/workspaces"
+	}
+	if c.ExecTimeoutSeconds == 0 {
+		c.ExecTimeoutSeconds = 30
+	}
+	if c.CPUs == 0 {
+		c.CPUs = 1
+	}
+	if c.MemoryMB == 0 {
+		c.MemoryMB = 512
+	}
+	if c.PIDsLimit == 0 {
+		c.PIDsLimit = 128
+	}
+	if c.TmpfsMB == 0 {
+		c.TmpfsMB = 64
+	}
+	if c.MaxOutputBytes == 0 {
+		c.MaxOutputBytes = 1 << 20
+	}
+	if c.MaxFileBytes == 0 {
+		c.MaxFileBytes = 1 << 20
+	}
+	return c
 }
 
 // WebConfig 保存网页工作台的监听配置。
@@ -140,6 +187,7 @@ type AgentConfig struct {
 	Models                    []string `yaml:"models"`
 	Skills                    []string `yaml:"skills,omitempty"`
 	MCPServers                []string `yaml:"mcp_servers,omitempty"`
+	SandboxEnabled            bool     `yaml:"sandbox_enabled,omitempty"`
 	MaxToolIterations         int      `yaml:"max_tool_iterations,omitempty"`
 	ToolTimeoutSeconds        int      `yaml:"tool_timeout_seconds,omitempty"`
 	ContextWindowTokens       int      `yaml:"context_window_tokens,omitempty"`
@@ -200,6 +248,7 @@ func LoadFile(path string) (*Config, error) {
 	cfg.TaskQueue = cfg.TaskQueue.WithDefaults()
 	cfg.Storage = cfg.Storage.WithDefaults()
 	cfg.Web = cfg.Web.WithDefaults()
+	cfg.Sandbox = cfg.Sandbox.WithDefaults()
 	if cfg.MCP.RequestTimeoutSeconds == 0 {
 		cfg.MCP.RequestTimeoutSeconds = 30
 	}
@@ -269,6 +318,13 @@ func validate(cfg *Config) error {
 	}
 	if cfg.MCP.MaxResultBytes <= 0 {
 		return fmt.Errorf("mcp.max_result_bytes must be greater than zero")
+	}
+	if strings.TrimSpace(cfg.Sandbox.Image) == "" || strings.TrimSpace(cfg.Sandbox.WorkspaceRoot) == "" {
+		return fmt.Errorf("sandbox image and workspace_root cannot be empty")
+	}
+	if cfg.Sandbox.ExecTimeoutSeconds <= 0 || cfg.Sandbox.CPUs <= 0 || cfg.Sandbox.MemoryMB < 6 ||
+		cfg.Sandbox.PIDsLimit <= 0 || cfg.Sandbox.TmpfsMB <= 0 || cfg.Sandbox.MaxOutputBytes <= 0 || cfg.Sandbox.MaxFileBytes <= 0 {
+		return fmt.Errorf("sandbox resource limits must be greater than zero and memory_mb at least 6")
 	}
 	for _, name := range sortedKeys(cfg.MCP.Servers) {
 		server := cfg.MCP.Servers[name]
