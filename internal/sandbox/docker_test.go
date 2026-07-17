@@ -42,3 +42,16 @@ func TestBuildDockerExecArgsKeepsCommandOutOfHostShell(t *testing.T) {
 		t.Fatal("command was interpolated into the shell script")
 	}
 }
+
+func TestParseDirectoryEntriesSortsAndPreservesTypes(t *testing.T) {
+	entries, err := parseDirectoryEntries([]byte("z.txt\x00f\x003\x00600\x00a\x00d\x004096\x00700\x00"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || entries[0].Name != "a" || entries[0].Type != "directory" || entries[1].Name != "z.txt" || entries[1].Size != 3 {
+		t.Fatalf("entries = %+v", entries)
+	}
+	if _, err := parseDirectoryEntries([]byte("broken\x00f\x00")); err == nil {
+		t.Fatal("malformed listing error = nil")
+	}
+}

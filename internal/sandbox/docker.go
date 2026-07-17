@@ -10,7 +10,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -254,16 +256,100 @@ func randomMarker() string {
 	return hex.EncodeToString(value[:])
 }
 
-func (d *DockerExecutor) ReadFile(context.Context, string) ([]byte, error) {
-	return nil, fmt.Errorf("Docker read_file is not implemented")
+func (d *DockerExecutor) ReadFile(ctx context.Context, rawPath string) ([]byte, error) {
+	target, err := containerWorkspacePath(rawPath)
+	if err != nil {
+		return nil, err
+	}
+	const script = `target=$(realpath -e -- "$1") || { echo "path does not exist" >&2; exit 2; }; case "$target" in /workspace/*) ;; *) echo "path escapes workspace" >&2; exit 2;; esac; [ -f "$target" ] || { echo "path is not a regular file" >&2; exit 2; }; size=$(stat -c %s -- "$target") || exit 2; [ "$size" -le "$2" ] || { echo "file exceeds size limit" >&2; exit 2; }; cat -- "$target"`
+	output, truncated, runErr := runDocker(ctx, nil, d.policy.MaxFileBytes, "exec", d.containerID, "sh", "-c", script, "sh", target, strconv.Itoa(d.policy.MaxFileBytes))
+	if runErr != nil {
+		return nil, fmt.Errorf("read sandbox file %q: %s", rawPath, strings.TrimSpace(output))
+	}
+	if truncated {
+		return nil, fmt.Errorf("read sandbox file %q exceeded %d bytes", rawPath, d.policy.MaxFileBytes)
+	}
+	return []byte(output), nil
 }
 
-func (d *DockerExecutor) WriteFile(context.Context, string, []byte) error {
-	return fmt.Errorf("Docker write_file is not implemented")
+func (d *DockerExecutor) WriteFile(ctx context.Context, rawPath string, content []byte) error {
+	if len(content) > d.policy.MaxFileBytes {
+		return fmt.Errorf("sandbox file exceeds %d bytes", d.policy.MaxFileBytes)
+	}
+	target, err := containerWorkspacePath(rawPath)
+	if err != nil {
+		return err
+	}
+	if target == "/workspace" {
+		return fmt.Errorf("cannot write the workspace directory as a file")
+	}
+	const script = `parent=$(dirname -- "$1"); ancestor="$parent"; while [ ! -e "$ancestor" ]; do next=$(dirname -- "$ancestor"); [ "$next" != "$ancestor" ] || exit 2; ancestor="$next"; done; resolved=$(realpath -e -- "$ancestor") || exit 2; case "$resolved" in /workspace|/workspace/*) ;; *) echo "path escapes workspace" >&2; exit 2;; esac; mkdir -p -- "$parent" || exit 2; resolved_parent=$(realpath -e -- "$parent") || exit 2; case "$resolved_parent" in /workspace|/workspace/*) ;; *) echo "path escapes workspace" >&2; exit 2;; esac; if [ -L "$1" ]; then resolved_target=$(realpath -e -- "$1") || exit 2; case "$resolved_target" in /workspace/*) ;; *) echo "symlink escapes workspace" >&2; exit 2;; esac; fi; tmp="$resolved_parent/.luckyclaw-write-$$"; umask 077; cat > "$tmp" || { rm -f -- "$tmp"; exit 2; }; size=$(stat -c %s -- "$tmp") || { rm -f -- "$tmp"; exit 2; }; [ "$size" -le "$2" ] || { rm -f -- "$tmp"; echo "file exceeds size limit" >&2; exit 2; }; mv -f -- "$tmp" "$1"`
+	output, _, runErr := runDocker(ctx, bytes.NewReader(content), 64<<10, "exec", "--interactive", d.containerID, "sh", "-c", script, "sh", target, strconv.Itoa(d.policy.MaxFileBytes))
+	if runErr != nil {
+		return fmt.Errorf("write sandbox file %q: %s", rawPath, strings.TrimSpace(output))
+	}
+	return nil
 }
 
-func (d *DockerExecutor) ListDir(context.Context, string) ([]FileEntry, error) {
-	return nil, fmt.Errorf("Docker list_dir is not implemented")
+func (d *DockerExecutor) ListDir(ctx context.Context, rawPath string) ([]FileEntry, error) {
+	target, err := containerWorkspacePath(rawPath)
+	if err != nil {
+		return nil, err
+	}
+	const script = `target=$(realpath -e -- "$1") || { echo "path does not exist" >&2; exit 2; }; case "$target" in /workspace|/workspace/*) ;; *) echo "path escapes workspace" >&2; exit 2;; esac; [ -d "$target" ] || { echo "path is not a directory" >&2; exit 2; }; find "$target" -mindepth 1 -maxdepth 1 -printf '%f\0%y\0%s\0%m\0'`
+	output, truncated, runErr := runDocker(ctx, nil, d.policy.MaxOutputBytes, "exec", d.containerID, "sh", "-c", script, "sh", target)
+	if runErr != nil {
+		return nil, fmt.Errorf("list sandbox directory %q: %s", rawPath, strings.TrimSpace(output))
+	}
+	if truncated {
+		return nil, fmt.Errorf("sandbox directory listing exceeds %d bytes", d.policy.MaxOutputBytes)
+	}
+	return parseDirectoryEntries([]byte(output))
+}
+
+func containerWorkspacePath(rawPath string) (string, error) {
+	cleaned, err := NormalizeWorkspacePath(rawPath)
+	if err != nil {
+		return "", err
+	}
+	if cleaned == "." {
+		return "/workspace", nil
+	}
+	return path.Join("/workspace", cleaned), nil
+}
+
+func parseDirectoryEntries(data []byte) ([]FileEntry, error) {
+	if len(data) == 0 {
+		return []FileEntry{}, nil
+	}
+	fields := bytes.Split(data, []byte{0})
+	if len(fields) > 0 && len(fields[len(fields)-1]) == 0 {
+		fields = fields[:len(fields)-1]
+	}
+	if len(fields)%4 != 0 {
+		return nil, fmt.Errorf("decode sandbox directory listing: malformed output")
+	}
+	entries := make([]FileEntry, 0, len(fields)/4)
+	for index := 0; index < len(fields); index += 4 {
+		size, err := strconv.ParseInt(string(fields[index+2]), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("decode sandbox directory entry size: %w", err)
+		}
+		entryType := "other"
+		switch string(fields[index+1]) {
+		case "f":
+			entryType = "file"
+		case "d":
+			entryType = "directory"
+		case "l":
+			entryType = "symlink"
+		}
+		entries = append(entries, FileEntry{
+			Name: string(fields[index]), Type: entryType, Size: size, Mode: string(fields[index+3]),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	return entries, nil
 }
 
 // Close 先关闭 keeper stdin，再定向强制删除未退出的容器。
