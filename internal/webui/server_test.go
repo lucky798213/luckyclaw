@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lucky798213/luckyclaw/internal/agent"
@@ -18,8 +20,34 @@ import (
 
 type webTestProvider struct{}
 
+type webTestStream struct {
+	step int
+}
+
+func (s *webTestStream) Next() (provider.StreamChunk, error) {
+	switch s.step {
+	case 0:
+		s.step++
+		return provider.StreamChunk{Delta: "网页"}, nil
+	case 1:
+		s.step++
+		return provider.StreamChunk{Delta: "回复"}, nil
+	case 2:
+		s.step++
+		return provider.StreamChunk{Done: true, Message: &provider.Message{Role: "assistant", Content: "网页回复"}}, nil
+	default:
+		return provider.StreamChunk{}, io.EOF
+	}
+}
+
+func (s *webTestStream) Close() error { return nil }
+
 func (webTestProvider) Chat(_ context.Context, _ []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.Message, error) {
 	return &provider.Message{Role: "assistant", Content: "网页回复"}, nil
+}
+
+func (webTestProvider) ChatStream(_ context.Context, _ []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (provider.Stream, error) {
+	return &webTestStream{}, nil
 }
 
 func newTestServer(t *testing.T) (*Server, string) {
@@ -128,4 +156,43 @@ func TestServerUpdatesSoul(t *testing.T) {
 	if string(content) != "你是严谨的研究助手。\n" {
 		t.Fatalf("soul = %q", content)
 	}
+}
+
+func TestServerStreamsChatEvents(t *testing.T) {
+	server, _ := newTestServer(t)
+	created := performJSONRequest(t, server.Handler(), http.MethodPost, "/api/agents/lucky/sessions", nil)
+	var createdSession sessionView
+	if err := json.NewDecoder(created.Body).Decode(&createdSession); err != nil {
+		t.Fatal(err)
+	}
+	response := performJSONRequest(t, server.Handler(), http.MethodPost,
+		"/api/agents/lucky/sessions/"+createdSession.Key+"/messages/stream",
+		messagePayload{Text: "你好"},
+	)
+	if response.Code != http.StatusOK {
+		t.Fatalf("stream status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("Content-Type"); got != "text/event-stream; charset=utf-8" {
+		t.Fatalf("content type = %q", got)
+	}
+	if response.Header().Get("X-Accel-Buffering") != "no" {
+		t.Fatal("缺少禁用代理缓冲响应头")
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"type":"token_delta"`) || !strings.Contains(body, `"delta":"网页"`) || !strings.Contains(body, `"type":"final"`) {
+		t.Fatalf("stream body=%s", body)
+	}
+}
+
+func TestContextLockStopsWaitingAfterCancellation(t *testing.T) {
+	lock := newContextLock()
+	if !lock.Lock(context.Background()) {
+		t.Fatal("首次获取锁失败")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if lock.Lock(ctx) {
+		t.Fatal("上下文取消后仍然获取到锁")
+	}
+	lock.Unlock()
 }

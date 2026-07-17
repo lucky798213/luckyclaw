@@ -30,6 +30,7 @@ const (
 	webAccountID   = "local-web"
 	maxSoulBytes   = 64 << 10
 	maxMessageBody = 64 << 10
+	sseHeartbeat   = 15 * time.Second
 )
 
 //go:embed static/*
@@ -164,6 +165,7 @@ func (s *Server) routes() (http.Handler, error) {
 	mux.HandleFunc("POST /api/agents/{agentID}/sessions", s.createSession)
 	mux.HandleFunc("GET /api/agents/{agentID}/sessions/{sessionKey}", s.getSession)
 	mux.HandleFunc("POST /api/agents/{agentID}/sessions/{sessionKey}/messages", s.sendMessage)
+	mux.HandleFunc("POST /api/agents/{agentID}/sessions/{sessionKey}/messages/stream", s.streamMessage)
 	mux.HandleFunc("PUT /api/agents/{agentID}/sessions/{sessionKey}/model", s.updateModel)
 	mux.HandleFunc("GET /", s.serveApp)
 	return securityHeaders(mux), nil
@@ -309,24 +311,125 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lock := s.sessionLock(current.ID(), record.Key)
-	lock.Lock()
+	if !lock.Lock(r.Context()) {
+		return
+	}
 	defer lock.Unlock()
-	reply := current.HandleMessage(r.Context(), bus.InboundMessage{
-		Channel:   record.Address.Channel,
-		AccountID: record.Address.AccountID,
-		ChatID:    record.Address.ChatID,
-		ThreadID:  record.Address.ThreadID,
-		UserID:    "local-user",
-		MessageID: "web-" + randomID(),
-		Text:      payload.Text,
-		AgentID:   current.ID(),
-	})
+	reply := current.HandleMessage(r.Context(), webInboundMessage(current.ID(), record, payload.Text))
 	view, err := s.sessionViewByKey(r.Context(), current.ID(), record.Key, true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "刷新会话失败")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reply": reply, "session": view})
+}
+
+func (s *Server) streamMessage(w http.ResponseWriter, r *http.Request) {
+	current := s.agentFromRequest(w, r)
+	if current == nil {
+		return
+	}
+	record, err := s.webSessionRecord(r.Context(), current.ID(), r.PathValue("sessionKey"))
+	if errors.Is(err, sessionNotFoundError{}) {
+		writeError(w, http.StatusNotFound, "会话不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取会话失败")
+		return
+	}
+	var payload messagePayload
+	if err := decodeJSON(w, r, &payload, maxMessageBody); err != nil {
+		return
+	}
+	payload.Text = strings.TrimSpace(payload.Text)
+	if payload.Text == "" {
+		writeError(w, http.StatusBadRequest, "消息不能为空")
+		return
+	}
+	if utf8.RuneCountInString(payload.Text) > 20000 {
+		writeError(w, http.StatusBadRequest, "消息不能超过 20000 个字符")
+		return
+	}
+	if payload.Text == "/new" {
+		writeError(w, http.StatusBadRequest, "网页端请使用“新会话”按钮创建会话")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "当前服务器不支持流式响应")
+		return
+	}
+	lock := s.sessionLock(current.ID(), record.Key)
+	if !lock.Lock(r.Context()) {
+		return
+	}
+	defer lock.Unlock()
+
+	ctx, cancel := context.WithCancel(r.Context())
+	events := current.HandleMessageStream(ctx, webInboundMessage(current.ID(), record, payload.Text))
+	defer func() {
+		cancel()
+		// Agent 退出后再释放会话锁，防止下一条消息读到尚未结束的本轮状态。
+		for range events {
+		}
+	}()
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+	heartbeat := time.NewTicker(sseHeartbeat)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				cancel()
+				return
+			}
+			flusher.Flush()
+		case event, open := <-events:
+			if !open {
+				return
+			}
+			if err := writeSSEEvent(w, flusher, event); err != nil {
+				cancel()
+				return
+			}
+			if event.Type == agent.EventFinal || event.Type == agent.EventError {
+				return
+			}
+		}
+	}
+}
+
+func webInboundMessage(agentID string, record session.Record, text string) bus.InboundMessage {
+	return bus.InboundMessage{
+		Channel:   record.Address.Channel,
+		AccountID: record.Address.AccountID,
+		ChatID:    record.Address.ChatID,
+		ThreadID:  record.Address.ThreadID,
+		UserID:    "local-user",
+		MessageID: "web-" + randomID(),
+		Text:      text,
+		AgentID:   agentID,
+	}
+}
+
+func writeSSEEvent(w http.ResponseWriter, flusher http.Flusher, event agent.Event) error {
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return nil
 }
 
 func (s *Server) updateModel(w http.ResponseWriter, r *http.Request) {
@@ -357,7 +460,9 @@ func (s *Server) updateModel(w http.ResponseWriter, r *http.Request) {
 		command = "/model " + payload.ModelRef
 	}
 	lock := s.sessionLock(current.ID(), record.Key)
-	lock.Lock()
+	if !lock.Lock(r.Context()) {
+		return
+	}
 	defer lock.Unlock()
 	current.HandleMessage(r.Context(), bus.InboundMessage{
 		Channel:   record.Address.Channel,
@@ -549,10 +654,33 @@ func contains(values []string, target string) bool {
 	return false
 }
 
-func (s *Server) sessionLock(agentID, sessionKey string) *sync.Mutex {
+type contextLock struct {
+	token chan struct{}
+}
+
+func newContextLock() *contextLock {
+	lock := &contextLock{token: make(chan struct{}, 1)}
+	lock.token <- struct{}{}
+	return lock
+}
+
+func (l *contextLock) Lock(ctx context.Context) bool {
+	select {
+	case <-l.token:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (l *contextLock) Unlock() {
+	l.token <- struct{}{}
+}
+
+func (s *Server) sessionLock(agentID, sessionKey string) *contextLock {
 	key := agentID + "\x00" + sessionKey
-	lock, _ := s.locks.LoadOrStore(key, &sync.Mutex{})
-	return lock.(*sync.Mutex)
+	lock, _ := s.locks.LoadOrStore(key, newContextLock())
+	return lock.(*contextLock)
 }
 
 func randomID() string {
