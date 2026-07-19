@@ -130,7 +130,7 @@ func (g *Gateway) Run(ctx context.Context) {
 
 // handleInbound 在 Gateway 前端完成去重并快速提交任务。
 func (g *Gateway) handleInbound(msg bus.InboundMessage) {
-	//去重
+	// 阶段一：在进入任务队列前去重，避免平台重试造成重复模型调用和重复写会话。
 	if g.deduper.isDuplicate(msg) {
 		log.Printf(
 			"忽略重复入站消息: channel=%s account_id=%s chat_id=%s thread_id=%s message_id=%s",
@@ -143,8 +143,10 @@ func (g *Gateway) handleInbound(msg bus.InboundMessage) {
 		return
 	}
 
+	// 阶段二：快速入队，不在 Gateway 消费循环里等待模型响应。
 	if err := g.taskQueue.Submit(msg); err != nil {
 		if errors.Is(err, taskqueue.ErrConversationQueueFull) {
+			// 背压拒绝不算真正消费成功，撤销去重记录后平台仍可稍后重试。
 			g.deduper.forget(msg)
 			log.Printf(
 				"会话任务队列已满，拒绝入站消息: channel=%s account_id=%s chat_id=%s thread_id=%s message_id=%s",
@@ -170,7 +172,7 @@ func (g *Gateway) handleInbound(msg bus.InboundMessage) {
 
 // processInbound 在会话队列中匹配 Agent、执行任务并生成出站消息。
 func (g *Gateway) processInbound(ctx context.Context, msg bus.InboundMessage) {
-	// 匹配 Agent。
+	// 阶段一：根据显式选择和多级绑定解析本条消息的目标 Agent。
 	target, err := g.matchAgent(msg)
 	var reply string
 	if err != nil {
@@ -182,6 +184,7 @@ func (g *Gateway) processInbound(ctx context.Context, msg bus.InboundMessage) {
 		return
 	}
 
+	// 阶段二：重新封装为统一出站消息，渠道层不需要理解 Agent 内部协议。
 	out := bus.OutboundMessage{
 		Channel:      msg.Channel,
 		AccountID:    msg.AccountID,
@@ -197,6 +200,7 @@ func (g *Gateway) processInbound(ctx context.Context, msg bus.InboundMessage) {
 }
 
 func (g *Gateway) matchAgent(msg bus.InboundMessage) (*agent.Agent, error) {
+	// 优先级一：调用方为本条消息显式指定 Agent。
 	if msg.AgentID != "" {
 		if target := g.agents.AgentByID(msg.AgentID); target != nil {
 			return target, nil
@@ -204,11 +208,13 @@ func (g *Gateway) matchAgent(msg bus.InboundMessage) (*agent.Agent, error) {
 		return nil, fmt.Errorf("没有找到指定的 Agent: %s", msg.AgentID)
 	}
 	address := msg.Address()
+	// 优先级二：线程绑定最精确，可以覆盖同一聊天的默认绑定。
 	if msg.ThreadID != "" {
 		if agentID, exists := g.threadBindings[address]; exists {
 			return g.agents.AgentByID(agentID), nil
 		}
 	}
+	// 优先级三和四：依次回退到聊天绑定、渠道账号绑定。
 	address.ThreadID = ""
 	if agentID, exists := g.chatBindings[address]; exists {
 		return g.agents.AgentByID(agentID), nil
@@ -216,6 +222,7 @@ func (g *Gateway) matchAgent(msg bus.InboundMessage) (*agent.Agent, error) {
 	if agentID, exists := g.accountBindings[address.Account()]; exists {
 		return g.agents.AgentByID(agentID), nil
 	}
+	// 优先级五：没有任何显式规则时使用全局默认 Agent。
 	if target := g.agents.DefaultAgent(); target != nil {
 		return target, nil
 	}

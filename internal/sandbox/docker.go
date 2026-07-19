@@ -45,6 +45,7 @@ type DockerExecutor struct {
 
 // NewDockerExecutor 创建并启动会话专属容器。
 func NewDockerExecutor(ctx context.Context, policy DockerPolicy, workspace string, skills []SkillMount) (*DockerExecutor, error) {
+	// 阶段一：校验资源策略、Workspace 和只读 Skill 挂载，拒绝危险或不完整配置。
 	if err := validateDockerPolicy(policy); err != nil {
 		return nil, err
 	}
@@ -63,6 +64,7 @@ func NewDockerExecutor(ctx context.Context, policy DockerPolicy, workspace strin
 			return nil, err
 		}
 	}
+	// 阶段二：创建受限容器，安全选项由参数数组传递，不把宿主输入拼进 Shell 命令。
 	arguments := buildContainerCreateArgs(policy, workspace, skills, os.Getuid(), os.Getgid())
 	output, _, err := runDocker(ctx, nil, 64<<10, arguments...)
 	if err != nil {
@@ -73,6 +75,7 @@ func NewDockerExecutor(ctx context.Context, policy DockerPolicy, workspace strin
 		return nil, fmt.Errorf("Docker create returned invalid container id %q", containerID)
 	}
 
+	// 阶段三：用长连接 keeper 维持会话容器，后续多个工具调用可以复用同一 Workspace。
 	keeper := exec.Command("docker", "start", "--attach", "--interactive", containerID)
 	keeperInput, err := keeper.StdinPipe()
 	if err != nil {
@@ -93,6 +96,7 @@ func NewDockerExecutor(ctx context.Context, policy DockerPolicy, workspace strin
 		keeperDone:  make(chan error, 1),
 	}
 	go func() { executor.keeperDone <- keeper.Wait() }()
+	// 阶段四：只有 Docker 明确报告 Running 才返回，失败路径会强制清理残留容器。
 	if err := executor.waitUntilRunning(ctx); err != nil {
 		_ = executor.Close(context.Background())
 		return nil, err

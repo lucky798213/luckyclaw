@@ -25,16 +25,19 @@ import (
 )
 
 func main() {
+	// 阶段一：加载配置并初始化所有需要长期存活的基础资源。
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	// ProviderManager 先校验全部模型目录，避免服务启动后才发现模型不可用。
 	providerManager := provider.NewManager()
 	if err := providerManager.RegisterAll(providerDefinitions(cfg.Providers)); err != nil {
 		log.Fatal(err)
 	}
 
+	// SQLite 同时承担会话原文、活动会话指针、摘要和长期记忆索引的持久化。
 	sessionStore, err := session.OpenSQLite(cfg.Storage.Path)
 	if err != nil {
 		log.Fatal(err)
@@ -45,6 +48,7 @@ func main() {
 		}
 	}()
 
+	// 阶段二：发现扩展能力，只启动配置中实际引用的 Skill、MCP 和沙箱资源。
 	skillCatalog, err := skills.Discover(cfg.Skills.Directories)
 	if err != nil {
 		log.Fatal(err)
@@ -83,6 +87,7 @@ func main() {
 			}
 		}()
 	}
+	// 阶段三：为每个 Agent 组装独立的模型白名单、工具注册表和会话管理器。
 	agents, err := buildAgents(cfg.Agents, providerManager, sessionStore, skillCatalog, mcpManager, sandboxPool, time.Duration(cfg.Sandbox.ExecTimeoutSeconds)*time.Second)
 	if err != nil {
 		log.Fatal(err)
@@ -92,6 +97,7 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// 阶段四：搭建与具体平台解耦的消息主干，并注册当前已实现的终端渠道。
 	messageBus := bus.New()
 	messageGateway, err := gateway.NewWithTaskQueueConfig(messageBus, agentManager, cfg.Bindings, cfg.TaskQueue)
 	if err != nil {
@@ -109,6 +115,7 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// 阶段五：用同一个根 Context 管理网页、Gateway、渠道和后台资源的生命周期。
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := context.WithCancel(signalCtx)
@@ -123,6 +130,7 @@ func main() {
 	}
 	log.Printf("网页工作台已启动: %s", webURL)
 
+	// 阶段六：后台启动消息处理链，主协程只负责等待任一退出条件并统一收尾。
 	gatewayDone := make(chan struct{})
 	go func() {
 		defer close(gatewayDone)
@@ -174,6 +182,7 @@ func buildAgents(
 	sandboxPool sandboxruntime.ExecutorPool,
 	sandboxTimeout time.Duration,
 ) (map[string]*agent.Agent, error) {
+	// 固定 Agent 初始化顺序，让启动错误和测试结果不受 map 随机遍历影响。
 	ids := make([]string, 0, len(configs))
 	for id := range configs {
 		ids = append(ids, id)
@@ -184,6 +193,8 @@ func buildAgents(
 	for _, id := range ids {
 		agentCfg := configs[id]
 		var additionalTools []tools.Tool
+
+		// 第一组扩展：只为白名单 Skill 暴露按需加载入口，避免把完整指令常驻上下文。
 		selectedSkills, err := skillCatalog.Select(agentCfg.Skills)
 		if err != nil {
 			return nil, fmt.Errorf("选择 Agent %q Skills: %w", id, err)
@@ -195,11 +206,13 @@ func buildAgents(
 			}
 			additionalTools = append(additionalTools, loadSkill)
 		}
+		// 第二组扩展：把该 Agent 允许使用的 MCP 工具转换到统一 Tool 接口。
 		mcpTools, err := mcpManager.ToolsFor(agentCfg.MCPServers)
 		if err != nil {
 			return nil, fmt.Errorf("创建 Agent %q MCP 工具: %w", id, err)
 		}
 		additionalTools = append(additionalTools, mcpTools...)
+		// 第三组扩展：仅显式开启沙箱的 Agent 才获得有状态的代码和文件工具。
 		if agentCfg.SandboxEnabled {
 			sandboxTools, err := tools.NewSandboxTools(sandboxPool, selectedSkills, sandboxTimeout)
 			if err != nil {
@@ -207,6 +220,7 @@ func buildAgents(
 			}
 			additionalTools = append(additionalTools, sandboxTools...)
 		}
+		// 第四组扩展：长期记忆工具复用会话库，并由运行时注入可信会话作用域。
 		if sessionStore != nil {
 			memorySearch, err := tools.NewMemorySearchTool(sessionStore, id)
 			if err != nil {
@@ -214,6 +228,7 @@ func buildAgents(
 			}
 			additionalTools = append(additionalTools, memorySearch)
 		}
+		// 统一注册表在启动阶段拒绝重名或无效定义，模型侧只面对一种工具协议。
 		toolRegistry, err := tools.NewDefaultRegistry(additionalTools...)
 		if err != nil {
 			return nil, fmt.Errorf("创建 Agent %q 工具注册表: %w", id, err)

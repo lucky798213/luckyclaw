@@ -48,6 +48,7 @@ func NewDockerPool(policy DockerPolicy, workspaceRoot string) (*DockerPool, erro
 
 // Get 返回当前 Agent/session 独享的执行器，并并发合并首次创建请求。
 func (p *DockerPool) Get(ctx context.Context, agentID, sessionKey string, mounts []SkillMount) (SandboxExecutor, error) {
+	// 阶段一：不可信标识先哈希成目录和缓存键，避免路径注入并隔离 Agent/session。
 	workspace, err := WorkspaceDirectory(p.workspaceRoot, agentID, sessionKey)
 	if err != nil {
 		return nil, err
@@ -59,6 +60,7 @@ func (p *DockerPool) Get(ctx context.Context, agentID, sessionKey string, mounts
 		p.mu.Unlock()
 		return nil, fmt.Errorf("Docker executor pool is closed")
 	}
+	// 阶段二：同一会话的并发首次请求共享 ready 信号，只允许创建一个容器。
 	if existing := p.entries[key]; existing != nil {
 		if existing.mountDigest != digest {
 			p.mu.Unlock()
@@ -73,11 +75,13 @@ func (p *DockerPool) Get(ctx context.Context, agentID, sessionKey string, mounts
 			return nil, ctx.Err()
 		}
 	}
+	// 阶段三：先发布“创建中”占位，再在锁外启动 Docker，避免慢操作阻塞其他会话。
 	entry := &poolEntry{ready: make(chan struct{}), mountDigest: digest}
 	p.entries[key] = entry
 	p.mu.Unlock()
 
 	executor, createErr := p.factory(ctx, p.policy, workspace, append([]SkillMount(nil), mounts...))
+	// 阶段四：回填结果并唤醒全部等待者；创建失败时移除占位，允许后续重试。
 	p.mu.Lock()
 	entry.executor = executor
 	entry.err = createErr

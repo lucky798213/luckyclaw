@@ -164,6 +164,7 @@ func validateFetchURL(raw string) (*url.URL, error) {
 }
 
 func safeDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	// 阶段一：在真正拨号前自行解析 DNS，不能只检查用户最初提交的域名字符串。
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
@@ -175,11 +176,13 @@ func safeDialContext(ctx context.Context, network, address string) (net.Conn, er
 	if len(addresses) == 0 {
 		return nil, fmt.Errorf("no addresses found for %s", host)
 	}
+	// 阶段二：只要任一解析结果落入私网、本机或特殊网段，就整体拒绝，防止 DNS 重绑定绕过。
 	for _, candidate := range addresses {
 		if isBlockedAddress(candidate.IP) {
 			return nil, fmt.Errorf("address %s for host %s is not allowed", candidate.IP, host)
 		}
 	}
+	// 阶段三：仅使用已经校验过的 IP 地址拨号，避免连接阶段再次解析到不同目标。
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	var lastErr error
 	for _, candidate := range addresses {

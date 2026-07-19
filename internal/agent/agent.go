@@ -341,9 +341,11 @@ func (a *Agent) runConversation(
 	maxTokens int,
 	temperature float64,
 ) (*provider.Message, error) {
-	// 初始化本轮工具循环状态。
+	// 阶段一：初始化本轮工具循环状态。
 	// toolCallCounts 用于识别同名同参数的重复调用；failedRounds 用于连续失败降级。
 	toolDefinitions := a.tools.Definitions()
+
+	//正常网页平台聊天，这里都不会为空。
 	if currentSession == nil {
 		filtered := make([]provider.Tool, 0, len(toolDefinitions))
 		for _, definition := range toolDefinitions {
@@ -356,7 +358,7 @@ func (a *Agent) runConversation(
 	toolCallCounts := make(map[toolCallSignature]int)
 	failedRounds := 0
 
-	// ReAct 工具循环：模型决定是否调用工具，工具结果再反馈给模型继续推理。
+	// 阶段二：进入 ReAct 工具循环，模型决定是否调用工具，结果再反馈给模型继续推理。
 	for iteration := 0; iteration < a.maxToolIterations; iteration++ {
 		// 正常模型调用始终携带完整工具定义，让模型可以选择直接回答或发起 ToolCalls。
 		assistantMessage, err := a.callModel(
@@ -391,7 +393,7 @@ func (a *Agent) runConversation(
 			return &assistant, nil
 		}
 
-		// 7. 模型请求调用工具：先补齐缺失的类型和 ID，确保每个结果都能准确配对。
+		// 阶段三：模型请求调用工具时，先补齐类型和 ID，确保每个结果都能准确配对。
 		assistant.ToolCalls = normalizeToolCalls(assistant.ToolCalls, iteration)
 		toolMessages := make([]provider.Message, 0, len(assistant.ToolCalls))
 		// 默认认为本轮全部失败，只要有一个工具成功就会改为 false，并重置连续失败计数。
@@ -451,7 +453,7 @@ func (a *Agent) runConversation(
 			}
 		}
 
-		// 8. 将完整工具轮加入本轮暂存和模型上下文，不提前写入持久化会话。
+		// 阶段四：将完整工具轮加入本轮暂存和模型上下文，不提前写入持久化会话。
 		pendingMessages = append(pendingMessages, assistant)
 		pendingMessages = append(pendingMessages, toolMessages...)
 		messages = append(messages, assistant)
@@ -474,7 +476,7 @@ func (a *Agent) runConversation(
 		}
 	}
 
-	// 9. 用完最大迭代次数仍没有最终文本时，再进行一次不携带工具的强制归纳调用。
+	// 阶段五：用完最大迭代次数仍没有最终文本时，进行一次不携带工具的强制归纳。
 	return a.synthesizeFinal(ctx, resolved, currentSession, messages, pendingMessages, fmt.Sprintf("已达到 %d 次工具迭代上限", a.maxToolIterations), events, maxTokens, temperature)
 }
 
@@ -565,15 +567,18 @@ func (a *Agent) executeToolCall(ctx context.Context, currentSession *session.Ses
 	if call.Type != "function" {
 		return "", fmt.Errorf("unsupported tool call type %q", call.Type)
 	}
+	// 阶段一：会话作用域由运行时注入，模型参数不能伪造 Agent、聊天或 session 身份。
 	if currentSession != nil {
 		ctx = tools.WithSessionScope(ctx, a.id, currentSession.Address(), currentSession.Key())
 	}
+	// 阶段二：为单次工具执行建立比整轮请求更细的超时边界。
 	toolCtx, cancel := context.WithTimeout(ctx, a.toolTimeout)
 	defer cancel()
 	type executionResult struct {
 		content string
 		err     error
 	}
+	// 阶段三：工具放到独立 goroutine 执行；缓冲通道保证调用方超时返回后不会阻塞发送结果。
 	resultChannel := make(chan executionResult, 1)
 	go func() {
 		result, err := a.tools.Execute(toolCtx, call.Function.Name, json.RawMessage(call.Function.Arguments))

@@ -44,6 +44,7 @@ type frontmatter struct {
 func Discover(directories []string) (*Catalog, error) {
 	catalog := &Catalog{byName: make(map[string]Skill)}
 	for _, rawDirectory := range directories {
+		// 阶段一：配置目录必须可读；启动时失败比运行中静默漏掉 Skill 更容易排查。
 		directory := strings.TrimSpace(rawDirectory)
 		if directory == "" {
 			return nil, fmt.Errorf("skill directory cannot be empty")
@@ -52,6 +53,7 @@ func Discover(directories []string) (*Catalog, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read skill directory %q: %w", directory, err)
 		}
+		// 阶段二：只把“直接子目录 + SKILL.md”视为候选 Skill，目录树不会被无限递归扫描。
 		for _, entry := range entries {
 			if !entry.IsDir() {
 				continue
@@ -63,10 +65,12 @@ func Discover(directories []string) (*Catalog, error) {
 				}
 				return nil, fmt.Errorf("stat skill manifest %q: %w", manifest, err)
 			}
+			// 阶段三：解析 frontmatter、校验名称规范，并把符号链接解析为稳定绝对路径。
 			skill, err := parseSkill(entry.Name(), manifest)
 			if err != nil {
 				return nil, err
 			}
+			// 阶段四：跨目录重名直接阻止启动，避免不同机器因扫描顺序加载到不同实现。
 			if existing, duplicate := catalog.byName[skill.Name]; duplicate {
 				return nil, fmt.Errorf("skill %q is duplicated in %q and %q", skill.Name, existing.Root, skill.Root)
 			}

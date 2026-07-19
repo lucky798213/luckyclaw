@@ -294,6 +294,7 @@ func (s *SQLiteStore) ListByAgent(ctx context.Context, agentID, channel string) 
 
 // UpdateMessages 仅允许追加完整历史，并在同一事务中写入长期记忆索引。
 func (s *SQLiteStore) UpdateMessages(ctx context.Context, agentID, key string, messages []provider.Message) error {
+	// 阶段一：先序列化目标完整历史，再开启事务锁定“原文更新 + 记忆索引”的一致性边界。
 	payload, err := marshalMessages(messages)
 	if err != nil {
 		return err
@@ -303,6 +304,7 @@ func (s *SQLiteStore) UpdateMessages(ctx context.Context, agentID, key string, m
 		return fmt.Errorf("begin update session messages %q: %w", key, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// 阶段二：读取库内原历史，拒绝删改或替换，只允许在末尾追加完整消息链。
 	var existingJSON string
 	if err := tx.QueryRowContext(ctx,
 		`SELECT messages_json FROM sessions WHERE agent_id = ? AND session_key = ?`, agentID, key).Scan(&existingJSON); err != nil {
@@ -318,6 +320,7 @@ func (s *SQLiteStore) UpdateMessages(ctx context.Context, agentID, key string, m
 	if len(messages) < len(existing) || !reflect.DeepEqual(existing, messages[:len(existing)]) {
 		return fmt.Errorf("update session messages %q must append to the complete history", key)
 	}
+	// 阶段三：更新会话原文，并仅为本次新增的尾部消息建立检索条目。
 	now := time.Now().UnixMilli()
 	result, err := tx.ExecContext(ctx, `
 		UPDATE sessions
@@ -333,6 +336,7 @@ func (s *SQLiteStore) UpdateMessages(ctx context.Context, agentID, key string, m
 	if err := insertMemoryEntries(ctx, tx, agentID, key, len(existing), messages[len(existing):], now, false); err != nil {
 		return fmt.Errorf("index session messages %q: %w", key, err)
 	}
+	// 阶段四：两类写入全部成功后一次提交，防止原文与长期记忆索引相互领先。
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit session messages %q: %w", key, err)
 	}
@@ -395,6 +399,7 @@ func (s *SQLiteStore) SearchMemory(
 	query string,
 	limit int,
 ) ([]MemorySearchResult, error) {
+	// 阶段一：规范查询并限制返回量，避免空查询或超大结果消耗模型上下文。
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil, fmt.Errorf("memory search query cannot be empty")
@@ -409,16 +414,19 @@ func (s *SQLiteStore) SearchMemory(
 	if len(terms) == 0 {
 		return nil, fmt.Errorf("memory search query cannot be empty")
 	}
+	// 阶段二：FTS5 trigram 不适合少于三个字符的词，短词改用带转义的 LIKE 精确回退。
 	for _, term := range terms {
 		if utf8.RuneCountInString(term) < 3 {
 			return s.searchMemoryLike(ctx, agentID, address, terms, limit)
 		}
 	}
 
+	// 阶段三：长关键词进入 FTS5；逐词加引号，避免用户输入改变 MATCH 查询语义。
 	quoted := make([]string, 0, len(terms))
 	for _, term := range terms {
 		quoted = append(quoted, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
 	}
+	// 阶段四：SQL 同时绑定 Agent 和完整会话地址，可跨 /new 会话但不能跨聊天读取记忆。
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT e.session_key, e.seq, e.role, e.content,
 			snippet(memory_fts, 0, '[', ']', '…', 32), e.created_at

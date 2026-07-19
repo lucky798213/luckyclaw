@@ -40,6 +40,7 @@ func NewManager(ctx context.Context, cfg config.MCPConfig, referenced []string) 
 
 func newManager(ctx context.Context, cfg config.MCPConfig, referenced []string, factory clientFactory) (*Manager, error) {
 	manager := &Manager{servers: make(map[string]*managedServer)}
+	// 阶段一：仅处理 Agent 白名单实际引用的服务，并固定启动顺序方便定位错误。
 	names := append([]string(nil), referenced...)
 	sort.Strings(names)
 	seen := make(map[string]struct{}, len(names))
@@ -53,6 +54,7 @@ func newManager(ctx context.Context, cfg config.MCPConfig, referenced []string, 
 			manager.Close(context.Background())
 			return nil, fmt.Errorf("unknown MCP server %q", name)
 		}
+		// 阶段二：在宿主侧解析环境变量引用，缺失密钥时快速失败且不经过 Shell。
 		environment, err := expandEnvironment(serverCfg.Env)
 		if err != nil {
 			manager.Close(context.Background())
@@ -69,6 +71,7 @@ func newManager(ctx context.Context, cfg config.MCPConfig, referenced []string, 
 			manager.Close(context.Background())
 			return nil, fmt.Errorf("create MCP server %q: %w", name, err)
 		}
+		// 阶段三：完成 MCP 初始化握手后拉取工具目录，任何失败都会关闭此前已启动的进程。
 		if err := client.Connect(ctx); err != nil {
 			_ = client.Close(context.Background())
 			manager.Close(context.Background())
@@ -80,6 +83,7 @@ func newManager(ctx context.Context, cfg config.MCPConfig, referenced []string, 
 			manager.Close(context.Background())
 			return nil, fmt.Errorf("list MCP server %q tools: %w", name, err)
 		}
+		// 阶段四：校验 schema 和重名后才发布服务，避免把不完整工具暴露给模型。
 		if err := validateToolDefinitions(name, definitions); err != nil {
 			_ = client.Close(context.Background())
 			manager.Close(context.Background())

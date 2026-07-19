@@ -77,6 +77,7 @@ func NewQueue(
 func (q *Queue) Submit(msg bus.InboundMessage) error {
 	address := msg.Address()
 
+	// 阶段一：在同一把锁内完成停止检查、会话队列创建和容量判断。
 	q.mu.Lock()
 	if q.stopped {
 		q.mu.Unlock()
@@ -93,12 +94,14 @@ func (q *Queue) Submit(msg bus.InboundMessage) error {
 		return ErrConversationQueueFull
 	}
 
+	// 阶段二：消息只追加到尾部；每个会话始终只有一个 worker 从头部消费。
 	state.pending = append(state.pending, msg)
 	if !exists {
 		q.workers.Add(1)
 	}
 	q.mu.Unlock()
 
+	// 阶段三：首条消息负责启动 worker，后续提交只入队，避免同会话并行执行。
 	if !exists {
 		go q.processConversation(address, state)
 	}
@@ -111,19 +114,21 @@ func (q *Queue) processConversation(address bus.ConversationAddress, state *conv
 	defer q.removeConversation(address, state)
 
 	for {
+		// 阶段一：先申请全局信号量，限制不同会话同时占用的模型处理槽数量。
 		select {
 		case q.sem <- struct{}{}:
 		case <-q.ctx.Done():
 			return
 		}
 
-		// 取出当前会话下一条待处理消息
+		// 阶段二：按 FIFO 取出当前会话下一条消息；队列清空后 worker 自动退出。
 		msg, exists := q.nextMessage(address, state)
 		if !exists {
 			<-q.sem
 			return
 		}
 
+		// 阶段三：每条消息拥有独立超时，超时后释放并发槽，让后续消息继续处理。
 		taskCtx, cancel := context.WithTimeout(q.ctx, q.taskTimeout)
 		q.handler(taskCtx, msg)
 		cancel()

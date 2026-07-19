@@ -28,9 +28,11 @@ func (a *Agent) prepareStatefulContext(
 	soul string,
 	userMessage provider.Message,
 ) ([]provider.Message, error) {
+	// 阶段一：始终从完整会话快照组装“摘要 + 未压缩原文 + 当前消息”。
 	snapshot := current.ContextSnapshot()
 	toolDefinitions := a.tools.Definitions()
 	messages := buildStatefulMessages(soul, snapshot, userMessage)
+	// 阶段二：未达到提前压缩阈值时只做硬窗口检查，不产生额外模型调用。
 	if !a.tokenBudget.shouldCompact(messages, toolDefinitions, a.maxTokens) {
 		if !a.tokenBudget.fits(messages, toolDefinitions, a.maxTokens) {
 			return nil, &contextWindowError{usage: a.tokenBudget.usage(messages, toolDefinitions, a.maxTokens)}
@@ -38,6 +40,7 @@ func (a *Agent) prepareStatefulContext(
 		return messages, nil
 	}
 
+	// 阶段三：达到阈值后滚动摘要；压缩失败但原上下文仍能放下时允许降级继续。
 	compacted, err := a.compactSnapshot(ctx, resolved, current, soul, userMessage, snapshot, toolDefinitions)
 	if err == nil {
 		return compacted, nil
@@ -84,6 +87,7 @@ func (a *Agent) compactSnapshot(
 	snapshot session.ContextSnapshot,
 	toolDefinitions []provider.Tool,
 ) ([]provider.Message, error) {
+	// 阶段一：优先保留配置数量的近期消息，并把切点回退到完整 user turn 边界。
 	cutoff := preferredCompactionCutoff(snapshot.Messages, snapshot.CompactedUntil, a.recentMessages)
 	lastTurn := lastUserMessageIndex(snapshot.Messages, snapshot.CompactedUntil)
 	if cutoff <= snapshot.CompactedUntil {
@@ -99,6 +103,7 @@ func (a *Agent) compactSnapshot(
 		return nil, fmt.Errorf("没有可安全压缩的完整旧轮次")
 	}
 
+	// 阶段二：把新选中的旧消息折叠进已有摘要，而不是每次重新总结全部历史。
 	summary := snapshot.Summary
 	position := snapshot.CompactedUntil
 	for {
@@ -114,12 +119,14 @@ func (a *Agent) compactSnapshot(
 			CompactedUntil: position,
 		}
 		messages := buildStatefulMessages(soul, candidate, userMessage)
+		// 阶段三：候选上下文满足硬窗口后才原子保存摘要位置，避免数据库游标提前推进。
 		if a.tokenBudget.fits(messages, toolDefinitions, a.maxTokens) {
 			if err := current.ApplyCompaction(ctx, snapshot.CompactedUntil, summary, position); err != nil {
 				return nil, fmt.Errorf("保存会话摘要: %w", err)
 			}
 			return messages, nil
 		}
+		// 阶段四：仍放不下就再吞并一个完整旧轮次，直到可容纳或确认无法安全压缩。
 		cutoff = nextUserMessageIndex(snapshot.Messages, position)
 		if cutoff <= position || cutoff > lastTurn {
 			return nil, fmt.Errorf("最近一个完整对话轮次仍超过上下文窗口")
